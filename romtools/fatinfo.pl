@@ -68,10 +68,13 @@ if (!$g_fatOffset) {
 }
 my $bootinfo= ReadBootInfo($fh);
 
+if ($bootinfo->{ReservedSectors}) {
+    $fh->seek(($bootinfo->{ReservedSectors}-1)*$bootinfo->{BytesPerSector}, SEEK_CUR);
+}
 my @fats;
 
 for (0 .. $bootinfo->{NumberOfFats}-1) {
-	$fats[$_]= ReadFat($fh, $bootinfo->{SectorsPerFAT});
+	$fats[$_]= ReadFat($fh, $bootinfo->{SectorsPerFAT}, $bootinfo->{FSID});
 }
 
 print "found ", scalar keys %{$fats[0]}, " files in fat\n" if (!$g_quiet);
@@ -80,7 +83,7 @@ $bootinfo->{rootdirofs}= $fh->tell();
 
 printf("reading rootdir from %08lx\n", $bootinfo->{rootdirofs}) if (!$g_quiet);
 
-my $rootdir= ReadDirectory($fh, $bootinfo->{rootdirofs}, $bootinfo->{RootEntries}/16);
+my $rootdir= ReadDirectory($fh, $bootinfo->{rootdirofs}, $bootinfo->{RootEntries}?$bootinfo->{RootEntries}/16:1);
 
 $bootinfo->{cluster2sector}= $bootinfo->{RootEntries}/16 + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + 1;
 
@@ -119,7 +122,9 @@ sub isFatBoot {
 	$fh->read($data, 64);
 
 	return substr($data, 3, 8) eq "MSWIN4.1"
-		&& substr($data, 54, 8) eq "FAT16   ";
+		&& ( substr($data, 54, 8) eq "FAT16   "
+		    || substr($data, 54, 8) eq "FAT12   "
+            || substr($data, 82, 8) eq "FAT32   " );
 }
 
 sub ReadBootInfo {
@@ -130,19 +135,28 @@ sub ReadBootInfo {
     printf("reading bootsector from %08lx\n", $fh->tell()) if (!$g_quiet);
 
 	my $data;
-	$fh->read($data, 512) or die "readboot\n";
+	$fh->read($data, 512) or die "error reading bootsector\n";
 
-	my @fields= unpack("A3A8vCvCvvCvvvVVCCCVA11A8a*", $data);
+    my @fields;
+    my @fieldnames;
+    if ($data =~ /FAT32/) {
+        @fields= unpack("A3A8vCvCvvCvvvVVVvvVvvA12CCCVA11A8a*", $data);
 
-	my @fieldnames= qw(Jump OEMID BytesPerSector SectorsPerCluster ReservedSectors NumberOfFats RootEntries NumberOfSectors MediaDescriptor SectorsPerFAT SectorsPerHead HeadsPerCylinder HiddenSectors BigNumberOfSectors PhysicalDrive CurrentHead Signature SerialNumber VolumeLabel FSID reserved);
+        @fieldnames= qw(Jump OEMID BytesPerSector SectorsPerCluster ReservedSectors NumberOfFats RootEntries NumberOfSectors MediaDescriptor oldSectorsPerFAT SectorsPerHead HeadsPerCylinder HiddenSectors BigNumberOfSectors SectorsPerFAT Flags Version StartOfRootDir FSISector BackupBootSector reserved PhysicalDrive unused Signature SerialNumber VolumeLabel FSID executablecode);
+    }
+    else {
+        @fields= unpack("A3A8vCvCvvCvvvVVCCCVA11A8a*", $data);
 
-	print "field count mismatch($#fields != $#fieldnames)\n" if ($#fields != $#fieldnames);
+        @fieldnames= qw(Jump OEMID BytesPerSector SectorsPerCluster ReservedSectors NumberOfFats RootEntries NumberOfSectors MediaDescriptor SectorsPerFAT SectorsPerHead HeadsPerCylinder HiddenSectors BigNumberOfSectors PhysicalDrive CurrentHead Signature SerialNumber VolumeLabel FSID reserved);
+    }
+    print "field count mismatch($#fields != $#fieldnames)\n" if ($#fields != $#fieldnames);
 
 	my %bootinfo= map { $fieldnames[$_] => $fields[$_] } (0..$#fields);
 
     if (!$g_quiet) {
         printf("%-11s      : %s\n", $fields[1], $fieldnames[1]);
         for (2..$#fieldnames-4) {
+            next if ($fieldnames[$_] eq "reserved");
             printf("%8x (%5d) : %s\n", $fields[$_], $fields[$_], $fieldnames[$_]);
         }
         printf("%-10s       : %s\n", $fields[-3], $fieldnames[-3]);
@@ -156,26 +170,40 @@ sub ReadBootInfo {
 
 # assumes filepointer points after bootsector
 sub ReadFat {
-	my ($fh, $sects)= @_;
+	my ($fh, $sects, $fsid)= @_;
 
     printf("reading fat from %08lx\n", $fh->tell()) if (!$g_quiet);
 
 	my $data;
-	$fh->read($data, 512*$sects) or die "ReadFat\n";
+	$fh->read($data, 512*$sects) or die "error reading ReadFat\n";
 
-	my @clusters= unpack("v*", $data);
+    my @clusters;
+    my $clusterspecial;
+    if ($fsid =~ /FAT16/) {
+        @clusters= unpack("v*", $data);
+        $clusterspecial=0xfff0;
+        print "detected FAT16\n";
+    }
+    elsif ($fsid =~ /FAT32/) {
+        @clusters= unpack("V*", $data);
+        $clusterspecial= 0xff00000;
+        print "detected FAT32\n";
+    }
+    elsif ($fsid =~ /FAT12/) {
+        die "fat12 not yet implemented\n";
+    }
 
-	my $maxused;
-	my %ref;
-	for (0..$#clusters) {
-		if ($clusters[$_]>0 && $clusters[$_]<0xfff0) {
-			$ref{$clusters[$_]}= 1;
+    my $maxused;
+    my %ref;
+    for (0..$#clusters) {
+        if ($clusters[$_]>0 && $clusters[$_]<$clusterspecial) {
+            $ref{$clusters[$_]}= 1;
 
-		}
-		if ($clusters[$_]) {
-			$maxused= $_;
-		}
-	}
+        }
+        if ($clusters[$_]) {
+            $maxused= $_;
+        }
+    }
 
 	printf("found %d clusters, max used= %04x\n", scalar @clusters, $maxused) if (!$g_quiet);
 
@@ -185,7 +213,7 @@ sub ReadFat {
 		if (!exists $ref{$_} && $clusters[$_]>0) {
 			my @list= ();
 
-			for (my $clus= $_ ; $clus>0 && $clus<0xfff0 ; $clus= $clusters[$clus]) {
+			for (my $clus= $_ ; $clus>0 && $clus<$clusterspecial ; $clus= $clusters[$clus]) {
 				push @list, $clus;
 			}
 			$files{$_}{clusterlist}= \@list;
@@ -242,8 +270,8 @@ sub ParseDirEntry {
 
     #print "hex: ", unpack("H*", $dirdata), "\n";
 
-	my @fieldnames= qw(filename attribute reserved time date start filesize);
-	my @fields= unpack("A11Ca10vvvV", $dirdata);
+	my @fieldnames= qw(filename attribute erasedchar creationstamp accessdate highstart time date start filesize);
+	my @fields= unpack("A11CCa5vvvvvV", $dirdata);
 	print "dirfield count mismatch($#fields != $#fieldnames)\n" if ($#fields != $#fieldnames);
 	my %direntry= map { $fieldnames[$_] => $fields[$_] } (0..$#fields);
 
@@ -262,7 +290,7 @@ sub ReadDirectory {
     $fh->seek($startofs, SEEK_SET);
 
 	my $data;
-	$fh->read($data, 512*$sects) or die "ReadDirectory\n";
+	$fh->read($data, 512*$sects) or die "error reading rootdir\n";
 
 	my @entries;
 	my @lfn= ();
@@ -307,9 +335,9 @@ sub isDirentry {
 sub PrintDirEntry {
 	my ($fat, $ent, $boot)= @_;
 
-	printf("%-11s %02x %04x %04x %04x %8d %s  '%s'\n",
+	printf("%-11s %02x %04x %04x %04x:%04x %8d  '%s'\n",
 		$ent->{filename}, $ent->{attribute}, $ent->{time}, $ent->{date},
-		$ent->{start}, $ent->{filesize}, unpack("H*", $ent->{reserved}), $ent->{lfn}) if (!$g_quiet);
+		$ent->{highstart}, $ent->{start}, $ent->{filesize}, $ent->{lfn}) if (!$g_quiet);
 	if (!isDirentry($ent) &&  exists $fat->{$ent->{start}}) {
 		my $nclusters= scalar @{$fat->{$ent->{start}}{clusterlist}};
 		my $expectedclusters= CalcNrOfClusters($ent->{filesize}, $boot);
@@ -433,3 +461,56 @@ sub SaveUnusedClusters {
 		$outfh->close();
 	}
 }
+
+#  fat12/fat16 bootsector layout
+# 00 A3    Jump
+# 03 A8    OEMID
+# 0b v     BytesPerSector
+# 0d C     SectorsPerCluster
+# 0e v     ReservedSectors
+# 10 C     NumberOfFats
+# 11 v     RootEntries
+# 13 v     NumberOfSectors
+# 15 C     MediaDescriptor
+# 16 v     SectorsPerFAT
+# 18 v     SectorsPerHead
+# 1a v     HeadsPerCylinder
+# 1c V     HiddenSectors
+# 20 V     BigNumberOfSectors
+# 24 C     PhysicalDrive
+# 25 C     CurrentHead
+# 26 C     Signature
+# 27 V     SerialNumber
+# 2b A11   VolumeLabel
+# 36 A8    FSID
+# 3e a*    reserved
+
+#  fat32 bootsector layout
+# 00 A3    Jump
+# 03 A8    OEMID
+# 0b v     BytesPerSector
+# 0d C     SectorsPerCluster
+# 0e v     ReservedSectors
+# 10 C     NumberOfFats
+# 11 v     RootEntries
+# 13 v     NumberOfSectors
+# 15 C     MediaDescriptor
+# 16 v     oldSectorsPerFAT
+# 18 v     SectorsPerHead
+# 1a v     HeadsPerCylinder
+# 1c V     HiddenSectors
+# 20 V     BigNumberOfSectors
+# 24 V     SectorsPerFAT
+# 28 v     Flags
+# 2a v     Version
+# 2c V     StartOfRootDir
+# 30 v     FSISector
+# 32 v     BackupBootSector
+# 34 A12   reserved
+# 40 C     PhysicalDrive
+# 41 C     unused
+# 42 C     Signature
+# 43 V     SerialNumber
+# 47 A11   VolumeLabel
+# 52 A8    FSID
+# 5a a*    executablecode
