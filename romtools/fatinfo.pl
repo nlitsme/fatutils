@@ -24,16 +24,20 @@ my $g_fatOffset= 0;
 my $g_verbose= 0;
 
 sub usage {
-    print "Usage: perl fatinfo.pl [options]  fatfilesystemimage\n";
-    print "   -f DIRECTORY  : save files to DIRECTORY\n";
-    print "   -d            : save deleted files\n";
-    print "   -c            : save unused clusters\n";
-    print "   -l            : save data from unused cluster space\n";
-    print "   -o OFFSET     : offset to FAT bootsector\n";
-    print "   -v            : be verbose\n";
+    return <<__EOF__
+Usage: perl fatinfo.pl [options]  fatfilesystemimage
+   -f DIRECTORY  : save files to DIRECTORY
+   -d            : save deleted files
+   -c            : save unused clusters
+   -l            : save data from unused cluster space
+   -o OFFSET     : offset to FAT bootsector
+   -v            : be verbose
 
-    print "\nfor example to print info on the xda-ii extended rom image:\n";
-    print "perl fatinfo.pl -o 0x70040 ms_.nbf\n";
+for example to print info on the xda-ii extended rom image:
+
+    perl fatinfo.pl -o 0x70040 ms_.nbf
+
+__EOF__
 }
 GetOptions(
     "f=s" => \$g_saveFilesTo,
@@ -43,6 +47,8 @@ GetOptions(
     "v" => \$g_verbose,
     "o=s" => sub { $g_fatOffset= eval $_[1]; },
 ) or die usage();
+
+die usage() if (!@ARGV);
 
 my $extromname= shift;
 my $fh= new IO::File($extromname, "r") or die "$extromname: $!\n";
