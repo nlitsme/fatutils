@@ -9,6 +9,8 @@ use strict;
 # script to extract deleted files / unused space from a fat filesystem
 #  ( for instance the xda2 extended rom upgrade file )
 #
+# shortcomings:
+#    - does not yet support subdirectories.
 # 
 
 $|=1;
@@ -65,11 +67,12 @@ for (0 .. $bootinfo->{NumberOfFats}-1) {
 print "found ", scalar keys %{$fats[0]}, " files in fat\n";
 
 my $rootdir= ReadDirectory($fh, $bootinfo->{RootEntries}/16);
-PrintDir($fats[0], $rootdir);
 
 $bootinfo->{cluster2sector}= $bootinfo->{RootEntries}/16 + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + 1;
 
 $bootinfo->{totalclusters}= int(($bootinfo->{NumberOfSectors}-$bootinfo->{cluster2sector})/$bootinfo->{SectorsPerCluster});
+
+PrintDir($fats[0], $rootdir, $bootinfo);
 
 SaveFiles($fh, $bootinfo, $fats[0], $rootdir) if ($g_saveFilesTo);
 
@@ -215,15 +218,20 @@ sub ReadDirectory {
 	return \@entries;
 }
 
+sub CalcNrOfClusters {
+    my ($size, $boot)= @_;
+    my $clustersize= $boot->{SectorsPerCluster}*$boot->{BytesPerSector};
+    return int(($size+$clustersize-1)/$clustersize);
+}
 sub PrintDirEntry {
-	my ($fat, $ent)= @_;
+	my ($fat, $ent, $boot)= @_;
 
 	printf("%-11s %02x %04x %04x %04x %8d %s  '%s'\n",
 		$ent->{filename}, $ent->{attribute}, $ent->{time}, $ent->{date},
 		$ent->{start}, $ent->{filesize}, unpack("H*", $ent->{reserved}), $ent->{lfn});
 	if (exists $fat->{$ent->{start}}) {
 		my $nclusters= scalar @{$fat->{$ent->{start}}{clusterlist}};
-		my $expectedclusters= int(($ent->{filesize}+2047)/2048);
+		my $expectedclusters= CalcNrOfClusters($ent->{filesize}, $boot);
 		if ($expectedclusters==$nclusters) {
 			#printf("   has %d clusters\n", $nclusters);
 		}
@@ -237,10 +245,11 @@ sub PrintDirEntry {
 }
 
 sub PrintDir {
-	my ($fat, $directory)= @_;
+	my ($fat, $directory, $boot)= @_;
 
+    print "8.3name    attr datetime start    size    reserved           longfilename\n";
 	for (@$directory) {
-		PrintDirEntry($fat, $_);
+		PrintDirEntry($fat, $_, $boot) if ($g_saveDeletedFiles || $g_verbose || !isDeletedEntry($_));
 	}
 }
 sub isDeletedEntry {
