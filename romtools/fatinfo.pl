@@ -9,40 +9,76 @@ use strict;
 # script to extract deleted files / unused space from a fat filesystem
 #  ( for instance the xda2 extended rom upgrade file )
 #
+# 
+
 $|=1;
 
 use IO::File;
+use Getopt::Long;
 
-my $fh= new IO::File(shift, "r") or die "open\n";
+my $g_saveFilesTo;
+my $g_saveDeletedFiles;
+my $g_saveUnusedClusters;
+my $g_saveLeftoverSize;
+my $g_fatOffset= 0;
+my $g_verbose= 0;
+
+sub usage {
+    print "Usage: perl fatinfo.pl [options]  fatfilesystemimage\n";
+    print "   -f DIRECTORY  : save files to DIRECTORY\n";
+    print "   -d            : save deleted files\n";
+    print "   -c            : save unused clusters\n";
+    print "   -l            : save data from unused cluster space\n";
+    print "   -o OFFSET     : offset to FAT bootsector\n";
+    print "   -v            : be verbose\n";
+
+    print "\nfor example to print info on the xda-ii extended rom image:\n";
+    print "perl fatinfo.pl -o 0x70040 ms_.nbf\n";
+}
+GetOptions(
+    "f=s" => \$g_saveFilesTo,
+    "d" => \$g_saveDeletedFiles,
+    "c" => \$g_saveUnusedClusters,
+    "l" => \$g_saveLeftoverSize,
+    "v" => \$g_verbose,
+    "o=s" => sub { $g_fatOffset= eval $_[1]; },
+) or die usage();
+
+my $extromname= shift;
+my $fh= new IO::File($extromname, "r") or die "$extromname: $!\n";
 binmode $fh;
 
-my $bootinfo= readbootinfo($fh);
+my $bootinfo= ReadBootInfo($fh);
 
 my @fats;
 
 for (0 .. $bootinfo->{NumberOfFats}-1) {
-	$fats[$_]= readfat($fh, $bootinfo->{SectorsPerFAT});
+	$fats[$_]= ReadFat($fh, $bootinfo->{SectorsPerFAT});
 }
 
 print "found ", scalar keys %{$fats[0]}, " files in fat\n";
 
-my $rootdir= readdirectory($fh, $bootinfo->{RootEntries}/16);
-printdir($fats[0], $rootdir);
+my $rootdir= ReadDirectory($fh, $bootinfo->{RootEntries}/16);
+PrintDir($fats[0], $rootdir);
 
 $bootinfo->{cluster2sector}= $bootinfo->{RootEntries}/16 + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + 1;
 
 $bootinfo->{totalclusters}= int(($bootinfo->{NumberOfSectors}-$bootinfo->{cluster2sector})/$bootinfo->{SectorsPerCluster});
 
-savefiles($fh, $bootinfo, $fats[0], $rootdir);
+SaveFiles($fh, $bootinfo, $fats[0], $rootdir) if ($g_saveFilesTo);
 
-saveunusedclusters($fh, $bootinfo, $fats[0]);
+SaveUnusedClusters($fh, $bootinfo, $fats[0]) if ($g_saveUnusedClusters);
 
 $fh->close();
 
 exit(0);
 
-sub readbootinfo {
+sub ReadBootInfo {
 	my ($fh)= @_;
+
+    $fh->seek($g_fatOffset, 0);
+
+    printf("reading bootsector from %08lx\n", $fh->tell());
 
 	my $data;
 	$fh->read($data, 512) or die "readboot\n";
@@ -67,11 +103,14 @@ sub readbootinfo {
 	return \%bootinfo;
 }
 
-sub readfat {
+# assumes filepointer points after bootsector
+sub ReadFat {
 	my ($fh, $sects)= @_;
 
+    printf("reading fat from %08lx\n", $fh->tell());
+
 	my $data;
-	$fh->read($data, 512*$sects) or die "readfat\n";
+	$fh->read($data, 512*$sects) or die "ReadFat\n";
 
 	my @clusters= unpack("v*", $data);
 
@@ -108,20 +147,22 @@ sub readfat {
 	$files{ref}= \%ref;
 	return \%files;
 }
-sub parseLFNentry {
+sub ParseLFNEntry {
 	my ($dirdata)= @_;
 
+    #print "hex: ", unpack("H*", $dirdata), "\n";
 	my @fields= unpack("Ca10CCCa12va4", $dirdata);
 	my $unicodename= $fields[1].$fields[5].$fields[7];
+    #print join(", ", map {sprintf("%d:%s", $_, unpack("H*",$fields[$_])) } (0..$#fields)), "\n";
 
-	my $namepart= pack("C*", unpack("v*", $unicodename));
+	my $namepart= pack("C*", grep { $_<256 } unpack("v*", $unicodename));
 
 	$namepart =~ s/\x00.*//;
 
 	return { part=>$fields[0]&0x1f, last=>$fields[0]&0x20, namepart=>$namepart };
 }
 
-sub parsedirentry {
+sub ParseDirEntry {
 	my ($dirdata)= @_;
 
 	my @fieldnames= qw(filename attribute reserved time date start filesize);
@@ -130,16 +171,20 @@ sub parsedirentry {
 	my %direntry= map { $fieldnames[$_] => $fields[$_] } (0..$#fields);
 
 	if ($direntry{attribute}==0xf) {
-		return parseLFNentry($dirdata);
+		return ParseLFNEntry($dirdata);
 	}
 
 	return \%direntry;
 }
-sub readdirectory {
+
+# assumes filepointer is at start of rootdir
+sub ReadDirectory {
 	my ($fh, $sects)= @_;
 
+    printf("reading rootdir from %08lx\n", $fh->tell());
+
 	my $data;
-	$fh->read($data, 512*$sects) or die "readdirectory\n";
+	$fh->read($data, 512*$sects) or die "ReadDirectory\n";
 
 	my @entries;
 	my @lfn= ();
@@ -148,7 +193,7 @@ sub readdirectory {
 
 		next if ($entrydata =~ /^\x00+$/);
 
-		my $ent= parsedirentry($entrydata);
+		my $ent= ParseDirEntry($entrydata);
 		if (exists $ent->{part}) {
 			push @lfn, $ent->{namepart};
 		}
@@ -156,7 +201,7 @@ sub readdirectory {
 			$ent->{lfn}= join("", reverse @lfn);
 			push @entries, $ent;
 
-			#printf("%d part lfn: %s\n", scalar @lfn, join(",",@lfn));
+            #printf("%d part lfn: %s\n", scalar @lfn, join(",",@lfn));
 			@lfn= ();
 		}
 	}
@@ -164,7 +209,7 @@ sub readdirectory {
 	return \@entries;
 }
 
-sub printdirentry {
+sub PrintDirEntry {
 	my ($fat, $ent)= @_;
 
 	printf("%-11s %02x %04x %04x %04x %8d %s  '%s'\n",
@@ -181,19 +226,22 @@ sub printdirentry {
 		}
 	}
 	elsif (exists $fat->{emptylist}{$ent->{start}}) {
-		printf("   is in emptylist\n");
+		printf("   is in emptylist\n") if ($g_verbose);
 	}
 }
 
-sub printdir {
+sub PrintDir {
 	my ($fat, $directory)= @_;
 
 	for (@$directory) {
-		printdirentry($fat, $_);
+		PrintDirEntry($fat, $_);
 	}
 }
-
-sub saveentry {
+sub isDeletedEntry {
+    my ($ent)= @_;
+    return $ent->{filename} =~ /^\xe5/;
+}
+sub SaveEntry {
 	my ($fh, $boot, $fat, $ent)= @_;
 
 	my $name= $ent->{lfn} || $ent->{filename};
@@ -207,32 +255,32 @@ sub saveentry {
 
 		print("avoided duplicate name for $name$extra\n");
 	}
-	my $outfh= IO::File->new("$name$extra", "w+");
+	my $outfh= IO::File->new("$g_saveFilesTo/$name$extra", "w+") or die "$g_saveFilesTo/$name$extra: $!";
 	binmode($outfh);
 	if (exists $fat->{$ent->{start}}) {
 		for (@{$fat->{$ent->{start}}{clusterlist}})
 		{
-			$outfh->write(readcluster($fh, $boot, $_));
+			$outfh->write(ReadCluster($fh, $boot, $_));
 			$fat->{ref}{$_}++;
 		}
 	}
 	elsif (exists $fat->{emptylist}{$ent->{start}}) {
 		my $nclusters= int(($ent->{filesize}+2047)/2048);
 		for (0..$nclusters-1) {
-			$outfh->write(readcluster($fh, $boot, $_+$ent->{start}));
+			$outfh->write(ReadCluster($fh, $boot, $_+$ent->{start}));
 
 			$fat->{ref}{$_}++;
 		}
 	}
 	my $leftoversize= $outfh->tell()-$ent->{filesize};
 	printf("truncating last %d bytes\n", $leftoversize);
-	if ($leftoversize>0) {
+	if ($g_saveLeftoverSize && $leftoversize>0) {
 		$outfh->seek($ent->{filesize}, 0);
 		my $leftoverdata;
 		$outfh->read($leftoverdata, $leftoversize);
 		$outfh->truncate($ent->{filesize});
 
-		my $leftfh= IO::File->new("$name$extra-leftover", "w");
+		my $leftfh= IO::File->new("$g_saveFilesTo/$name$extra-leftover", "w") or die "$g_saveFilesTo/$name$extra-leftover: $!";
 		binmode($leftfh);
 		$leftfh->write($leftoverdata);
 		$leftfh->close();
@@ -240,25 +288,25 @@ sub saveentry {
 	$outfh->close();
 
 }
-sub savefiles {
+sub SaveFiles {
 	my ($fh, $boot, $fat, $directory)= @_;
 
 	for (@$directory) {
-		saveentry($fh, $boot, $fat, $_);
+		SaveEntry($fh, $boot, $fat, $_) if ($g_saveDeletedFiles || !isDeletedEntry($_));
 	}
 }
 
-sub readsector {
+sub ReadSector {
 	my ($fh, $nr)= @_;
 
-	$fh->seek(512*$nr, 0);
+	$fh->seek($g_fatOffset+512*$nr, 0);
 
 	my $data;
 	$fh->read($data, 512);
 
 	return $data;
 }
-sub readcluster {
+sub ReadCluster {
 	my ($fh, $boot, $nr)= @_;
 
 	my $startsector= ($nr-2)*4+$boot->{cluster2sector};
@@ -266,20 +314,21 @@ sub readcluster {
 	my @data;
 
 	for (0..$bootinfo->{SectorsPerCluster}-1) {
-		push @data, readsector($fh, $startsector+$_);
+		push @data, ReadSector($fh, $startsector+$_);
 	}
 
 	return join "", @data;
 }
-sub saveunusedclusters {
+sub SaveUnusedClusters {
 	my ($fh, $boot, $fat)= @_;
 
 	for (2 .. $boot->{totalclusters}-1) {
 		next if (exists $fat->{ref}{$_});
 
-		my $outfh= IO::File->new(sprintf("cluster-%04x", $_), "w");
+        my $clusterfn= sprintf("$g_saveFilesTo/cluster-%04x", $_);
+		my $outfh= IO::File->new($clusterfn, "w") or die "$clusterfn: $!";
 		binmode($outfh);
-		$outfh->write(readcluster($fh, $boot, $_));
+		$outfh->write(ReadCluster($fh, $boot, $_));
 		$outfh->close();
 	}
 }
