@@ -78,7 +78,9 @@ print "found ", scalar keys %{$fats[0]}, " files in fat\n" if (!$g_quiet);
 
 $bootinfo->{rootdirofs}= $fh->tell();
 
-my $rootdir= ReadDirectory($fh, $bootinfo->{RootEntries}/16);
+printf("reading rootdir from %08lx\n", $bootinfo->{rootdirofs}) if (!$g_quiet);
+
+my $rootdir= ReadDirectory($fh, $bootinfo->{rootdirofs}, $bootinfo->{RootEntries}/16);
 
 $bootinfo->{cluster2sector}= $bootinfo->{RootEntries}/16 + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + 1;
 
@@ -255,10 +257,9 @@ sub ParseDirEntry {
 
 # assumes filepointer is at start of rootdir
 sub ReadDirectory {
-	my ($fh, $sects)= @_;
+	my ($fh, $startofs, $sects)= @_;
 
-    my $rootdirofs= $fh->tell();
-    printf("reading rootdir from %08lx\n", $rootdirofs) if (!$g_quiet);
+    $fh->seek($startofs, SEEK_SET);
 
 	my $data;
 	$fh->read($data, 512*$sects) or die "ReadDirectory\n";
@@ -272,7 +273,7 @@ sub ReadDirectory {
 
 		my $ent= ParseDirEntry($entrydata);
 
-        push @{$ent->{diskoffsets}}, $rootdirofs+32*$_;
+        push @{$ent->{diskoffsets}}, $startofs+32*$_;
 
 		if (exists $ent->{part}) {
 			push @lfn, $ent->{namepart};
