@@ -182,6 +182,7 @@ sub ParseDirEntry {
 	if ($direntry{attribute}==0xf) {
 		return ParseLFNEntry($dirdata);
 	}
+	$direntry{filename} =~ s/^(\S+)\s+(...)$/$1.$2/;
 
 	return \%direntry;
 }
