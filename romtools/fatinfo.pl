@@ -199,14 +199,14 @@ sub ReadFat {
 sub ParseLFNEntry {
 	my ($dirdata)= @_;
 
-    # 00  bits4-0=partnr  bit5=last
-    # 01  namepart1
+    # 00  bits5-0=partnr  bit6=last   bit7 = erased.
+    # 01  namepart1 - 5 unicode chars
     # 0b  0x0f
-    # 0c  ?
-    # 0d  ?
-    # 0e  namepart2
-    # 1a  ?
-    # 1c  namepart3
+    # 0c  ?  0x00
+    # 0d  ?  checksum of shortname
+    # 0e  namepart2 - 6 unicode chars
+    # 1a  ?  0x0000
+    # 1c  namepart3 - 2 unicode chars
 
     #print "hex: ", unpack("H*", $dirdata), "\n";
 	my @fields= unpack("Ca10CCCa12va4", $dirdata);
@@ -217,7 +217,8 @@ sub ParseLFNEntry {
 
 	$namepart =~ s/\x00.*//;
 
-	return { part=>$fields[0]&0x1f, last=>$fields[0]&0x20, namepart=>$namepart };
+    #printf("LFN part %2d  last=%d name=%s\n", $fields[0]&0x3f, $fields[0]&0x40, $namepart );
+	return { part=>$fields[0]&0x3f, last=>$fields[0]&0x40, namepart=>$namepart };
 }
 
 sub ParseDirEntry {
@@ -226,10 +227,18 @@ sub ParseDirEntry {
     # 00 filenameext
     # 0b attrib         != 0x0f
     # 0c reserved
+    #  0c  first char of erased filename.
+    #  0d  10ms createtime.
+    #  0e  creation time
+    #  10  creation date
+    #  12  access date
+    #  14  high 16 bits of cluster nr (fat32)
     # 16 time
     # 18 date
     # 1a startcluster
     # 1c filesize
+
+    #print "hex: ", unpack("H*", $dirdata), "\n";
 
 	my @fieldnames= qw(filename attribute reserved time date start filesize);
 	my @fields= unpack("A11Ca10vvvV", $dirdata);
