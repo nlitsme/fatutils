@@ -56,6 +56,9 @@ my $extromname= shift;
 my $fh= new IO::File($extromname, "r") or die "$extromname: $!\n";
 binmode $fh;
 
+if (!$g_fatOffset) {
+	FindFatOffset($fh);
+}
 my $bootinfo= ReadBootInfo($fh);
 
 my @fats;
@@ -81,6 +84,26 @@ SaveUnusedClusters($fh, $bootinfo, $fats[0]) if ($g_saveUnusedClusters);
 $fh->close();
 
 exit(0);
+
+sub FindFatOffset {
+	my ($fh)= @_;
+
+	for (0, 0x40, 0x70000, 0x70040) {
+		if (isFatBoot($fh, $_)) {
+			$g_fatOffset= $_;
+			return;
+		}
+	}
+}
+sub isFatBoot {
+	my ($fh, $ofs)= @_;
+	my $data;
+	$fh->seek($ofs, SEEK_SET);
+	$fh->read($data, 64);
+
+	return substr($data, 3, 8) eq "MSWIN4.1"
+		&& substr($data, 54, 8) eq "FAT16   ";
+}
 
 sub ReadBootInfo {
 	my ($fh)= @_;
@@ -257,21 +280,22 @@ sub isDeletedEntry {
     my ($ent)= @_;
     return $ent->{filename} =~ /^\xe5/;
 }
+sub GetUniqueName {
+    my ($dir, $name)= @_;
+
+    my $fn= "$dir/$name";
+    my $i= 1;
+    while (-e $fn) {
+        $fn= sprintf("%s/%s-%d", $dir, $name, $i++);
+    }
+
+    return $fn;
+}
 sub SaveEntry {
 	my ($fh, $boot, $fat, $ent)= @_;
 
-	my $name= $ent->{lfn} || $ent->{filename};
-	my $extra= "";
-
-	if (-e $name) {
-		my $i=0;
-		do {
-			$extra= sprintf("-%03d", $i++);
-		} while(-e "$name$extra");
-
-		print("avoided duplicate name for $name$extra\n");
-	}
-	my $outfh= IO::File->new("$g_saveFilesTo/$name$extra", "w+") or die "$g_saveFilesTo/$name$extra: $!";
+	my $name= GetUniqueName($g_saveFilesTo, $ent->{lfn} || $ent->{filename});
+	my $outfh= IO::File->new($name, "w+") or die "$name: $!";
 	binmode($outfh);
 	if (exists $fat->{$ent->{start}}) {
 		for (@{$fat->{$ent->{start}}{clusterlist}})
@@ -289,18 +313,18 @@ sub SaveEntry {
 		}
 	}
 	my $leftoversize= $outfh->tell()-$ent->{filesize};
-	printf("truncating last %d bytes\n", $leftoversize);
+	printf("truncating last %d bytes for %s\n", $leftoversize, $name);
 	if ($g_saveLeftoverSize && $leftoversize>0) {
 		$outfh->seek($ent->{filesize}, 0);
 		my $leftoverdata;
 		$outfh->read($leftoverdata, $leftoversize);
-		$outfh->truncate($ent->{filesize});
 
-		my $leftfh= IO::File->new("$g_saveFilesTo/$name$extra-leftover", "w") or die "$g_saveFilesTo/$name$extra-leftover: $!";
+		my $leftfh= IO::File->new("$$name-leftover", "w") or die "$name-leftover: $!";
 		binmode($leftfh);
 		$leftfh->write($leftoverdata);
 		$leftfh->close();
 	}
+	$outfh->truncate($ent->{filesize});
 	$outfh->close();
 
 }
