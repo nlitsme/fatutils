@@ -38,7 +38,7 @@ Usage: perl fatinfo.pl [options]  fatfilesystemimage
    -l            : save data from unused cluster space
    -o OFFSET     : offset to FAT bootsector
    -v            : be verbose
-   -r            : repair incorrect filesize
+   -r            : repair incorrect filesize (only rootdir entries)
 
 for example to print info on the xda-ii extended rom image:
 
@@ -83,19 +83,39 @@ $bootinfo->{rootdirofs}= $fh->tell();
 
 printf("reading rootdir from %08lx\n", $bootinfo->{rootdirofs}) if (!$g_quiet);
 
-my $rootdir= ReadDirectory($fh, $bootinfo->{rootdirofs}, $bootinfo->{RootEntries}?$bootinfo->{RootEntries}/16:1);
-
 $bootinfo->{cluster2sector}= $bootinfo->{RootEntries}/16 + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + 1;
 
 $bootinfo->{totalclusters}= int(($bootinfo->{NumberOfSectors}-$bootinfo->{cluster2sector})/$bootinfo->{SectorsPerCluster});
 
-PrintDir($fats[0], $rootdir, $bootinfo);
+$fh->seek($bootinfo->{rootdirofs}, SEEK_SET);
+my $rootnsects= $bootinfo->{RootEntries}?$bootinfo->{RootEntries}/16:1;
+my $rootdata;
+$fh->read($rootdata, $rootnsects*$bootinfo->{BytesPerSector}) or die sprintf("error reading rootdir\n");
+processdir($fh, $bootinfo, $bootinfo->{rootdirofs}, $rootdata);
 
-SaveFiles($fh, $bootinfo, $fats[0], $rootdir) if ($g_saveFilesTo);
 
 SaveUnusedClusters($fh, $bootinfo, $fats[0]) if ($g_saveUnusedClusters);
 
 $fh->close();
+
+sub processdir {
+    my ($fh, $bootinfo, $ofs, $data)= @_;
+
+    my $dir= ParseDirectory($ofs, $data);
+
+    PrintDir($fats[0], $dir, $bootinfo);
+
+    SaveFiles($fh, $bootinfo, $fats[0], $dir) if ($g_saveFilesTo);
+
+	for my $dirent (@$dir) {
+        if ($dirent->{attribute}&0x10) {
+            next if ($dirent->{filename} eq ".." || $dirent->{filename} eq "." );
+
+            my $dirdata= ReadClusterChain($fh, $bootinfo, $fats[0], $dirent->{start});
+            processdir($fh, $bootinfo, (($dirent->{start}-2)*$bootinfo->{SectorsPerCluster}+$bootinfo->{cluster2sector})*$bootinfo->{BytesPerSector}, $dirdata);
+        }
+    }
+}
 
 
 if ($g_repair && @g_repaircmds) {
@@ -284,23 +304,19 @@ sub ParseDirEntry {
 }
 
 # assumes filepointer is at start of rootdir
-sub ReadDirectory {
-	my ($fh, $startofs, $sects)= @_;
-
-    $fh->seek($startofs, SEEK_SET);
-
-	my $data;
-	$fh->read($data, 512*$sects) or die "error reading rootdir\n";
+sub ParseDirectory {
+	my ($startofs, $data)= @_;
 
 	my @entries;
 	my @lfn= ();
-	for (0..$sects*16-1) {
+	for (0..length($data)/32-1) {
 		my $entrydata= substr($data, 32*$_, 32);
 
 		next if ($entrydata =~ /^\x00+$/);
 
 		my $ent= ParseDirEntry($entrydata);
 
+        # NOTE: this only works for rootdir entries.
         push @{$ent->{diskoffsets}}, $startofs+32*$_;
 
 		if (exists $ent->{part}) {
@@ -326,6 +342,7 @@ sub CalcNrOfClusters {
 sub ModifyFileSize {
     my ($ent, $size)= @_;
 
+    # NOTE: this only works for rootdir entries.
     push @g_repaircmds, sprintf("-pd %08lx:%08lx", $ent->{diskoffsets}[0]+0x1c, $size);
 }
 sub isDirentry {
@@ -335,7 +352,7 @@ sub isDirentry {
 sub PrintDirEntry {
 	my ($fat, $ent, $boot)= @_;
 
-	printf("%-11s %02x %04x %04x %04x:%04x %8d  '%s'\n",
+	printf("%-11s %02x %04x-%04x %04x:%04x %8d  '%s'\n",
 		$ent->{filename}, $ent->{attribute}, $ent->{time}, $ent->{date},
 		$ent->{highstart}, $ent->{start}, $ent->{filesize}, $ent->{lfn}) if (!$g_quiet);
 	if (!isDirentry($ent) &&  exists $fat->{$ent->{start}}) {
@@ -360,7 +377,7 @@ sub PrintDirEntry {
 sub PrintDir {
 	my ($fat, $directory, $boot)= @_;
 
-    print "8.3name    attr datetime start    size    reserved           longfilename\n" if (!$g_quiet);
+    print "8.3name    attr datetime start         size    longfilename\n" if (!$g_quiet);
 	for (@$directory) {
 		PrintDirEntry($fat, $_, $boot) if ($g_saveDeletedFiles || $g_verbose || !isDeletedEntry($_));
 	}
@@ -379,6 +396,16 @@ sub GetUniqueName {
     }
 
     return $fn;
+}
+sub ReadClusterChain {
+	my ($fh, $boot, $fat, $start)= @_;
+    my $data= "";
+    for (@{$fat->{$start}{clusterlist}})
+    {
+        $data .= ReadCluster($fh, $boot, $_);
+        $fat->{ref}{$_}++;
+    }
+    return $data;
 }
 sub SaveEntry {
 	my ($fh, $boot, $fat, $ent)= @_;
@@ -408,7 +435,7 @@ sub SaveEntry {
 		my $leftoverdata;
 		$outfh->read($leftoverdata, $leftoversize);
 
-		my $leftfh= IO::File->new("$$name-leftover", "w") or die "$name-leftover: $!";
+		my $leftfh= IO::File->new("$name-leftover", "w") or die "$name-leftover: $!";
 		binmode($leftfh);
 		$leftfh->write($leftoverdata);
 		$leftfh->close();
@@ -438,7 +465,7 @@ sub ReadSector {
 sub ReadCluster {
 	my ($fh, $boot, $nr)= @_;
 
-	my $startsector= ($nr-2)*4+$boot->{cluster2sector};
+	my $startsector= ($nr-2)*$bootinfo->{SectorsPerCluster}+$boot->{cluster2sector};
 
 	my @data;
 
