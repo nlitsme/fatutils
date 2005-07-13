@@ -17,6 +17,7 @@ $|=1;
 
 use IO::File;
 use Getopt::Long;
+use File::Path;
 
 my $g_saveFilesTo;
 my $g_saveDeletedFiles;
@@ -91,28 +92,35 @@ $fh->seek($bootinfo->{rootdirofs}, SEEK_SET);
 my $rootnsects= $bootinfo->{RootEntries}?$bootinfo->{RootEntries}/16:1;
 my $rootdata;
 $fh->read($rootdata, $rootnsects*$bootinfo->{BytesPerSector}) or die sprintf("error reading rootdir\n");
-processdir($fh, $bootinfo, $bootinfo->{rootdirofs}, $rootdata);
+processdir($fh, $bootinfo, $bootinfo->{rootdirofs}, $rootdata, "");
 
 
 SaveUnusedClusters($fh, $bootinfo, $fats[0]) if ($g_saveUnusedClusters);
 
 $fh->close();
 
+# parameters:
+#   fh: handle to file containing fat image
+#   bootinfo: params from bootsector
+#   ofs: offset to this directory, relative to start of fat image.
+#   data: data containing dir entries.
 sub processdir {
-    my ($fh, $bootinfo, $ofs, $data)= @_;
+    my ($fh, $bootinfo, $ofs, $data, $path)= @_;
 
     my $dir= ParseDirectory($ofs, $data);
 
+    printf("\n directory %s\n\n", $path||"/");
     PrintDir($fats[0], $dir, $bootinfo);
 
-    SaveFiles($fh, $bootinfo, $fats[0], $dir) if ($g_saveFilesTo);
+    SaveFiles($fh, $bootinfo, $fats[0], $dir, $path) if ($g_saveFilesTo);
 
 	for my $dirent (@$dir) {
         if ($dirent->{attribute}&0x10) {
             next if ($dirent->{filename} eq ".." || $dirent->{filename} eq "." );
 
             my $dirdata= ReadClusterChain($fh, $bootinfo, $fats[0], $dirent->{start});
-            processdir($fh, $bootinfo, (($dirent->{start}-2)*$bootinfo->{SectorsPerCluster}+$bootinfo->{cluster2sector})*$bootinfo->{BytesPerSector}, $dirdata);
+            my $dirofs= (($dirent->{start}-2)*$bootinfo->{SectorsPerCluster}+$bootinfo->{cluster2sector})*$bootinfo->{BytesPerSector};
+            processdir($fh, $bootinfo, $dirofs, $dirdata, $path."/".($dirent->{lfn}||$dirent->{filename}));
         }
     }
 }
@@ -139,7 +147,7 @@ sub isFatBoot {
 	my ($fh, $ofs)= @_;
 	my $data;
 	$fh->seek($ofs, SEEK_SET);
-	$fh->read($data, 64);
+	$fh->read($data, 128);
 
 	return substr($data, 3, 8) eq "MSWIN4.1"
 		&& ( substr($data, 54, 8) eq "FAT16   "
@@ -298,12 +306,18 @@ sub ParseDirEntry {
 	if ($direntry{attribute}==0xf) {
 		return ParseLFNEntry($dirdata);
 	}
-	$direntry{filename} =~ s/^(\S+)\s+(...)$/$1.$2/;
+	$direntry{filename} =~ s/^(\S+)\s*(...)$/$1.$2/;
 
 	return \%direntry;
 }
 
-# assumes filepointer is at start of rootdir
+# 
+# startofs: byte-offset relative to start of fat image.
+#           ( used to calc disk offset of dir entry )
+# data: datablock containing all dir entries
+#
+# RETURNS:
+#   array of dir entries.
 sub ParseDirectory {
 	my ($startofs, $data)= @_;
 
@@ -317,6 +331,7 @@ sub ParseDirectory {
 		my $ent= ParseDirEntry($entrydata);
 
         # NOTE: this only works for rootdir entries.
+        # other directories are not nescesarily stored in consequetive sectors.
         push @{$ent->{diskoffsets}}, $startofs+32*$_;
 
 		if (exists $ent->{part}) {
@@ -352,9 +367,16 @@ sub isDirentry {
 sub PrintDirEntry {
 	my ($fat, $ent, $boot)= @_;
 
-	printf("%-11s %02x %04x-%04x %04x:%04x %8d  '%s'\n",
-		$ent->{filename}, $ent->{attribute}, $ent->{time}, $ent->{date},
-		$ent->{highstart}, $ent->{start}, $ent->{filesize}, $ent->{lfn}) if (!$g_quiet);
+    if (($ent->{attribute}&0x10)!=0 && $ent->{filesize}==0) {
+        printf("%-12s %02x %04x-%04x %04x:%04x %8s  '%s'\n",
+            $ent->{filename}, $ent->{attribute}, $ent->{time}, $ent->{date},
+            $ent->{highstart}, $ent->{start}, "<DIR>", $ent->{lfn}) if (!$g_quiet);
+    }
+    else {
+        printf("%-12s %02x %04x-%04x %04x:%04x %8d  '%s'\n",
+            $ent->{filename}, $ent->{attribute}, $ent->{time}, $ent->{date},
+            $ent->{highstart}, $ent->{start}, $ent->{filesize}, $ent->{lfn}) if (!$g_quiet);
+    }
 	if (!isDirentry($ent) &&  exists $fat->{$ent->{start}}) {
 		my $nclusters= scalar @{$fat->{$ent->{start}}{clusterlist}};
 		my $expectedclusters= CalcNrOfClusters($ent->{filesize}, $boot);
@@ -389,6 +411,11 @@ sub isDeletedEntry {
 sub GetUniqueName {
     my ($dir, $name)= @_;
 
+    if (-e $dir && ! -d $dir) {
+        die "not a directory: $dir\n";
+    }
+    mkpath $dir if (!-d $dir);
+
     my $fn= "$dir/$name";
     my $i= 1;
     while (-e $fn) {
@@ -408,9 +435,9 @@ sub ReadClusterChain {
     return $data;
 }
 sub SaveEntry {
-	my ($fh, $boot, $fat, $ent)= @_;
+	my ($fh, $boot, $fat, $ent, $path)= @_;
 
-	my $name= GetUniqueName($g_saveFilesTo, $ent->{lfn} || $ent->{filename});
+	my $name= GetUniqueName("$g_saveFilesTo$path", $ent->{lfn} || $ent->{filename});
 	my $outfh= IO::File->new($name, "w+") or die "$name: $!";
 	binmode($outfh);
 	if (exists $fat->{$ent->{start}}) {
@@ -429,8 +456,8 @@ sub SaveEntry {
 		}
 	}
 	my $leftoversize= $outfh->tell()-$ent->{filesize};
-	printf("truncating last %d bytes for %s\n", $leftoversize, $name);
 	if ($g_saveLeftoverSize && $leftoversize>0) {
+        printf("truncating last %d bytes for %s\n", $leftoversize, $name);
 		$outfh->seek($ent->{filesize}, 0);
 		my $leftoverdata;
 		$outfh->read($leftoverdata, $leftoversize);
@@ -445,10 +472,12 @@ sub SaveEntry {
 
 }
 sub SaveFiles {
-	my ($fh, $boot, $fat, $directory)= @_;
+	my ($fh, $boot, $fat, $directory, $path)= @_;
 
 	for (@$directory) {
-		SaveEntry($fh, $boot, $fat, $_) if ($g_saveDeletedFiles || !isDeletedEntry($_));
+        if (($_->{attribute}&0x10)==0) {
+            SaveEntry($fh, $boot, $fat, $_, $path) if ($g_saveDeletedFiles || !isDeletedEntry($_));
+        }
 	}
 }
 
