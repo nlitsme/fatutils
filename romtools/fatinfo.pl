@@ -4,7 +4,7 @@ use strict;
 # Author: Willem Jan Hengeveld <itsme@xs4all.nl>
 # Web: http://www.xda-developers.com/
 #
-# $Header$
+# $Header: /var/db/cvs/xda-devtools/romtools/fatinfo.pl,v 1.12 2005/07/13 20:20:04 itsme Exp $
 #
 # script to extract deleted files / unused space from a fat filesystem
 #  ( for instance the xda2 extended rom upgrade file )
@@ -570,3 +570,15 @@ sub SaveUnusedClusters {
 # 47 A11   VolumeLabel
 # 52 A8    FSID
 # 5a a*    executablecode
+
+# partition table layout
+#
+# 00 C  Partition status, 0x80 = Active, 0x00 = inactive
+# 01 C  First head used by partition
+# 02 v  First sector and cylinder used by partition
+# 04 C  Partition type
+# 05 C  Last head used by partition
+# 06 v  Last sector and cylinder used by partition
+# 08 V  Location of boot sector
+# 0c V  Number of sectors for partition
+
