@@ -74,8 +74,8 @@ if ($bootinfo->{ReservedSectors}) {
 }
 my @fats;
 
-for (0 .. $bootinfo->{NumberOfFats}-1) {
-	$fats[$_]= ReadFat($fh, $bootinfo->{SectorsPerFAT}, $bootinfo->{FSID});
+for my $fatidx (0 .. $bootinfo->{NumberOfFats}-1) {
+	$fats[$fatidx]= ReadFat($fh, $bootinfo->{SectorsPerFAT}, $bootinfo->{FSID});
 }
 
 print "found ", scalar keys %{$fats[0]}, " files in fat\n" if (!$g_quiet);
@@ -136,9 +136,9 @@ exit(0);
 sub FindFatOffset {
 	my ($fh)= @_;
 
-	for (0, 0x40, 0x70000, 0x70040) {
-		if (isFatBoot($fh, $_)) {
-			$g_fatOffset= $_;
+	for my $ofs (0, 0x40, 0x70000, 0x70040) {
+		if (isFatBoot($fh, $ofs)) {
+			$g_fatOffset= $ofs;
 			return;
 		}
 	}
@@ -146,8 +146,8 @@ sub FindFatOffset {
 sub isFatBoot {
 	my ($fh, $ofs)= @_;
 	my $data;
-	$fh->seek($ofs, SEEK_SET);
-	$fh->read($data, 128);
+	$fh->seek($ofs, SEEK_SET) or return;
+	$fh->read($data, 128) or return;
 
 	return substr($data, 3, 8) eq "MSWIN4.1"
 		&& ( substr($data, 54, 8) eq "FAT16   "
@@ -183,9 +183,9 @@ sub ReadBootInfo {
 
     if (!$g_quiet) {
         printf("%-11s      : %s\n", $fields[1], $fieldnames[1]);
-        for (2..$#fieldnames-4) {
-            next if ($fieldnames[$_] eq "reserved");
-            printf("%8x (%5d) : %s\n", $fields[$_], $fields[$_], $fieldnames[$_]);
+        for my $idx (2..$#fieldnames-4) {
+            next if ($fieldnames[$idx] eq "reserved");
+            printf("%8x (%5d) : %s\n", $fields[$idx], $fields[$idx], $fieldnames[$idx]);
         }
         printf("%-10s       : %s\n", $fields[-3], $fieldnames[-3]);
         printf("%-10s       : %s\n", $fields[-2], $fieldnames[-2]);
@@ -207,7 +207,7 @@ sub ReadFat {
 
     my @clusters;
     my $clusterspecial;
-    if ($fsid =~ /FAT16/) {
+    if ($fsid =~ /FAT16/ && $data =~ /^\xf8\xff\xff\xff/) {
         @clusters= unpack("v*", $data);
         $clusterspecial=0xfff0;
         print "detected FAT16\n";
@@ -217,19 +217,25 @@ sub ReadFat {
         $clusterspecial= 0xff00000;
         print "detected FAT32\n";
     }
-    elsif ($fsid =~ /FAT12/) {
-        die "fat12 not yet implemented\n";
+    elsif ($fsid =~ /FAT12/ || $data =~ /^\xf8\xff\xff/) {
+        my @bytes= unpack("C*", $data);
+        for (my $i=0 ; $i+2<@bytes ; $i+=3)
+        {
+            push @clusters, $bytes[$i]|(($bytes[$i+1]&0xf)<<8);
+            push @clusters, ($bytes[$i+1]>>4)|($bytes[$i+2]<<4);
+            $clusterspecial= 0xff0;
+        }
     }
 
     my $maxused;
     my %ref;
-    for (0..$#clusters) {
-        if ($clusters[$_]>0 && $clusters[$_]<$clusterspecial) {
-            $ref{$clusters[$_]}= 1;
+    for my $clus (0..$#clusters) {
+        if ($clusters[$clus]>0 && $clusters[$clus]<$clusterspecial) {
+            $ref{$clusters[$clus]}= 1;
 
         }
-        if ($clusters[$_]) {
-            $maxused= $_;
+        if ($clusters[$clus]) {
+            $maxused= $clus;
         }
     }
 
@@ -237,17 +243,17 @@ sub ReadFat {
 
 	my %emptylist;
 	my %files;
-	for (0..$#clusters) {
-		if (!exists $ref{$_} && $clusters[$_]>0) {
+	for my $startclus (2..$#clusters) {
+		if (!exists $ref{$startclus} && $clusters[$startclus]>0) {
 			my @list= ();
 
-			for (my $clus= $_ ; $clus>0 && $clus<$clusterspecial ; $clus= $clusters[$clus]) {
+			for (my $clus= $startclus ; $clus>0 && $clus<$clusterspecial ; $clus= $clusters[$clus]) {
 				push @list, $clus;
 			}
-			$files{$_}{clusterlist}= \@list;
+			$files{$startclus}{clusterlist}= \@list;
 		}
-		elsif ($clusters[$_]==0) {
-			$emptylist{$_}= 1;
+		elsif ($clusters[$startclus]==0) {
+			$emptylist{$startclus}= 1;
 		}
 	}
 	$files{emptylist}= \%emptylist;
@@ -323,8 +329,8 @@ sub ParseDirectory {
 
 	my @entries;
 	my @lfn= ();
-	for (0..length($data)/32-1) {
-		my $entrydata= substr($data, 32*$_, 32);
+	for my $entidx (0..length($data)/32-1) {
+		my $entrydata= substr($data, 32*$entidx, 32);
 
 		next if ($entrydata =~ /^\x00+$/);
 
@@ -332,7 +338,7 @@ sub ParseDirectory {
 
         # NOTE: this only works for rootdir entries.
         # other directories are not nescesarily stored in consequetive sectors.
-        push @{$ent->{diskoffsets}}, $startofs+32*$_;
+        push @{$ent->{diskoffsets}}, $startofs+32*$entidx;
 
 		if (exists $ent->{part}) {
 			push @lfn, $ent->{namepart};
@@ -400,8 +406,8 @@ sub PrintDir {
 	my ($fat, $directory, $boot)= @_;
 
     print "8.3name    attr datetime start         size    longfilename\n" if (!$g_quiet);
-	for (@$directory) {
-		PrintDirEntry($fat, $_, $boot) if ($g_saveDeletedFiles || $g_verbose || !isDeletedEntry($_));
+	for my $dirent (@$directory) {
+		PrintDirEntry($fat, $dirent, $boot) if ($g_saveDeletedFiles || $g_verbose || !isDeletedEntry($dirent));
 	}
 }
 sub isDeletedEntry {
@@ -427,10 +433,10 @@ sub GetUniqueName {
 sub ReadClusterChain {
 	my ($fh, $boot, $fat, $start)= @_;
     my $data= "";
-    for (@{$fat->{$start}{clusterlist}})
+    for my $cluster (@{$fat->{$start}{clusterlist}})
     {
-        $data .= ReadCluster($fh, $boot, $_);
-        $fat->{ref}{$_}++;
+        $data .= ReadCluster($fh, $boot, $cluster);
+        $fat->{ref}{$cluster}++;
     }
     return $data;
 }
@@ -441,18 +447,18 @@ sub SaveEntry {
 	my $outfh= IO::File->new($name, "w+") or die "$name: $!";
 	binmode($outfh);
 	if (exists $fat->{$ent->{start}}) {
-		for (@{$fat->{$ent->{start}}{clusterlist}})
+		for my $cluster (@{$fat->{$ent->{start}}{clusterlist}})
 		{
-			$outfh->write(ReadCluster($fh, $boot, $_));
-			$fat->{ref}{$_}++;
+			$outfh->write(ReadCluster($fh, $boot, $cluster));
+			$fat->{ref}{$cluster}++;
 		}
 	}
 	elsif (exists $fat->{emptylist}{$ent->{start}}) {
 		my $nclusters= int(($ent->{filesize}+2047)/2048);
-		for (0..$nclusters-1) {
-			$outfh->write(ReadCluster($fh, $boot, $_+$ent->{start}));
+		for my $cluster (0..$nclusters-1) {
+			$outfh->write(ReadCluster($fh, $boot, $cluster+$ent->{start}));
 
-			$fat->{ref}{$_}++;
+			$fat->{ref}{$cluster}++;
 		}
 	}
 	my $leftoversize= $outfh->tell()-$ent->{filesize};
@@ -474,9 +480,9 @@ sub SaveEntry {
 sub SaveFiles {
 	my ($fh, $boot, $fat, $directory, $path)= @_;
 
-	for (@$directory) {
-        if (($_->{attribute}&0x10)==0) {
-            SaveEntry($fh, $boot, $fat, $_, $path) if ($g_saveDeletedFiles || !isDeletedEntry($_));
+	for my $dirent (@$directory) {
+        if (($dirent->{attribute}&0x10)==0) {
+            SaveEntry($fh, $boot, $fat, $dirent, $path) if ($g_saveDeletedFiles || !isDeletedEntry($dirent));
         }
 	}
 }
@@ -498,8 +504,8 @@ sub ReadCluster {
 
 	my @data;
 
-	for (0..$bootinfo->{SectorsPerCluster}-1) {
-		push @data, ReadSector($fh, $startsector+$_);
+	for my $sector (0..$bootinfo->{SectorsPerCluster}-1) {
+		push @data, ReadSector($fh, $startsector+$sector);
 	}
 
 	return join "", @data;
@@ -507,17 +513,19 @@ sub ReadCluster {
 sub SaveUnusedClusters {
 	my ($fh, $boot, $fat)= @_;
 
-	for (2 .. $boot->{totalclusters}-1) {
-		next if (exists $fat->{ref}{$_});
+	for my $cluster (2 .. $boot->{totalclusters}-1) {
+		next if (exists $fat->{ref}{$cluster});
 
-        my $clusterfn= sprintf("$g_saveFilesTo/cluster-%04x", $_);
+        my $clusterfn= sprintf("$g_saveFilesTo/cluster-%04x", $cluster);
 		my $outfh= IO::File->new($clusterfn, "w") or die "$clusterfn: $!";
 		binmode($outfh);
-		$outfh->write(ReadCluster($fh, $boot, $_));
+		$outfh->write(ReadCluster($fh, $boot, $cluster));
 		$outfh->close();
 	}
 }
 
+# see http://www.win.tue.nl/~aeb/linux/fs/fat/fat.html
+#
 #  fat12/fat16 bootsector layout
 # 00 A3    Jump
 # 03 A8    OEMID
