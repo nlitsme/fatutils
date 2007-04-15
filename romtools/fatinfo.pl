@@ -1,17 +1,17 @@
 #!perl -w
 use strict;
-# (C) 2003 XDA Developers
-# Author: Willem Jan Hengeveld <itsme@xs4all.nl>
-# Web: http://www.xda-developers.com/
+# (C) 2003-2007 Willem Jan Hengeveld <itsme@xs4all.nl>
+# Web: http://www.xs4all.nl/~itsme/
+#      http://wiki.xda-developers.com/
 #
-# $Header: /var/db/cvs/xda-devtools/romtools/fatinfo.pl,v 1.12 2005/07/13 20:20:04 itsme Exp $
+# $Id$
 #
 # script to extract deleted files / unused space from a fat filesystem
 #  ( for instance the xda2 extended rom upgrade file )
 #
-# shortcomings:
-#    - does not yet support subdirectories.
 # 
+# todo:
+#    allow user to specify partition in diskimage
 
 $|=1;
 
