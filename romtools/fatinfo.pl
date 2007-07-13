@@ -13,6 +13,126 @@ use strict;
 # todo:
 #    allow user to specify partition in diskimage
 
+package PartitionTable;
+use strict;
+use IO::File;
+
+my %typelist= (
+    0x00=>'Empty',
+    0x01=>'FAT-12',
+    0x02=>'XENIX',
+    0x03=>'XENIX',
+    0x04=>'FAT-16',
+    0x05=>'Extended Partition',
+    0x06=>'DOS >32Meg',
+    0x07=>'NTFS',
+    0x0A=>'Boot Manager',
+    0x0B=>'FAT-32',
+    0x0e=>'WIN95: DOS 16-bit FAT, LBA',
+    0x0f=>'WIN95: Extpartition, LBA',
+    0x11=>'hid FAT-12',
+    0x14=>'hid FAT-16',
+    0x17=>'hid OS/2 HPFS',
+    0x1B=>'hid FAT-32',
+    0x1c=>'Hid WIN95 OSR2 FAT32, LBA',
+    0x1e=>'hid WIN95: DOS 16-bit FAT, LBA',
+    0x1f=>'hid WIN95: Ext partition, LBA',
+    0x41=>'linux/minix',
+    0x82=>'linux/swap',
+    0x83=>'linux/native',
+    0x64=>'Novell',
+    0x75=>'PCIX',
+    0xDB=>'CPM/Concurrent',
+    0xFF=>'BBT',
+);
+
+sub dump_ptable {
+    my ($data)= @_;
+    if (substr($data, 510, 2) ne "\x55\xaa") {
+        warn "missing 55aa signature at end of ptable\n";
+    }
+    for (0..3) {
+        my $pdata= substr($data, 0x1be+0x10*$_, 0x10);
+        next if ($pdata eq "\x00" x 16);
+        my $ptab= parsepentry($pdata);
+        printpentry($ptab);
+    }
+}
+sub is_fat_type {
+    return $typelist{$_[0]} =~ /fat/i;
+}
+sub get_fat_partition {
+    my ($data, $n)= @_;
+    if (substr($data, 510, 2) ne "\x55\xaa") {
+        warn "missing 55aa signature at end of ptable\n";
+    }
+    for (0..3) {
+        my $pdata= substr($data, 0x1be+0x10*$_, 0x10);
+        next if ($pdata eq "\x00" x 16);
+        my $ptab= parsepentry($pdata);
+        return $_ if is_fat_type($ptab->{type});
+    }
+}
+sub partition_offset {
+    my ($data, $n)= @_;
+    if (substr($data, 510, 2) ne "\x55\xaa") {
+        warn "missing 55aa signature at end of ptable\n";
+    }
+    my $pdata= substr($data, 0x1be+0x10*$n, 0x10);
+    return if ($pdata eq "\x00" x 16);
+    my $ptab= parsepentry($pdata);
+    return $ptab->{startsector}*0x200;
+}
+sub printpentry {
+    my $pent= shift;
+    printf("%1s (%s) - (%s) %08lx %08lx %s\n",
+        $pent->{bootable}?"B":"",
+        chs_asstring($pent->{startchs}),
+        chs_asstring($pent->{endchs}),
+        $pent->{startsector},
+        $pent->{nrsectors},
+        type_asstring($pent->{type}));
+    printf("offset: %08lx00 - %08lx00  l=%08lx00\n", 
+        $pent->{startsector}*2,
+        $pent->{startsector}*2+ $pent->{nrsectors}*2, $pent->{nrsectors}*2);
+}
+sub chs_asstring {
+    my $chs= shift;
+    return sprintf("%03x:%02x:%02x", $chs->{cyl}, $chs->{side}, $chs->{sect});
+}
+sub type_asstring {
+    my $type= shift;
+    if (exists $typelist{$type}) {
+        return $typelist{$type};
+    }
+    return sprintf("%02x", $type);
+}
+sub parsepentry {
+    my $pdata= shift;
+    my %pent;
+    my ($startchs, $endchs);
+    (
+    $pent{bootable},
+    $startchs,
+    $pent{type},
+    $endchs,
+    $pent{startsector},
+    $pent{nrsectors},
+    ) = unpack("Ca3Ca3VV", $pdata);
+    $pent{startchs}= parsechs($startchs);
+    $pent{endchs}= parsechs($endchs);
+    return \%pent;
+}
+sub parsechs {
+    my @chsdata= unpack("C*", shift);
+    return {
+        side=>$chsdata[0],
+        cyl=>(($chsdata[1]&0xc0)<<2) | $chsdata[2],
+        sect=>$chsdata[1]&0x3f,
+    };
+}
+
+package main;
 $|=1;
 
 use IO::File;
@@ -64,6 +184,16 @@ my $extromname= shift;
 my $fh= new IO::File($extromname, "r") or die "$extromname: $!\n";
 binmode $fh;
 
+my $data;
+$fh->read($data, 512);
+if (substr($data,510) eq "\x55\xaa" && substr($data,0,2) eq "\xfa\x33") {
+    PartitionTable::dump_ptable($data);
+    my $fatidx= PartitionTable::get_fat_partition($data);
+    if (defined $fatidx) {
+        $g_fatOffset= PartitionTable::partition_offset($data, $fatidx);
+        printf("using fat partition %d: offset=%08lx\n", $fatidx, $g_fatOffset);
+    }
+}
 if (!$g_fatOffset) {
 	FindFatOffset($fh);
 }
@@ -84,7 +214,8 @@ $bootinfo->{rootdirofs}= $fh->tell();
 
 printf("reading rootdir from %08lx\n", $bootinfo->{rootdirofs}) if (!$g_quiet);
 
-$bootinfo->{cluster2sector}= $bootinfo->{RootEntries}/16 + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + 1;
+$bootinfo->{cluster2sector}= $bootinfo->{RootEntries}/16 + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + $bootinfo->{ReservedSectors};
+printf("cluster#2 : sector 0x%x ( offset %08lx )\n", $bootinfo->{cluster2sector}, $bootinfo->{cluster2sector}*$bootinfo->{BytesPerSector}+$g_fatOffset);
 
 $bootinfo->{totalclusters}= int(($bootinfo->{NumberOfSectors}-$bootinfo->{cluster2sector})/$bootinfo->{SectorsPerCluster});
 
