@@ -13,6 +13,8 @@ use strict;
 # todo:
 #    allow user to specify partition in diskimage
 
+my $g_sectorsize=512;
+
 package PartitionTable;
 use strict;
 use IO::File;
@@ -81,7 +83,7 @@ sub partition_offset {
     my $pdata= substr($data, 0x1be+0x10*$n, 0x10);
     return if ($pdata eq "\x00" x 16);
     my $ptab= parsepentry($pdata);
-    return $ptab->{startsector}*0x200;
+    return $ptab->{startsector}*$g_sectorsize;
 }
 sub printpentry {
     my $pent= shift;
@@ -143,6 +145,7 @@ my $g_saveFilesTo;
 my $g_saveDeletedFiles;
 my $g_saveUnusedClusters;
 my $g_saveLeftoverSize;
+my $g_saveOrphanedChains;
 my $g_fatOffset= 0;
 my $g_verbose= 0;
 my $g_quiet= 0;
@@ -156,6 +159,7 @@ Usage: perl fatinfo.pl [options]  fatfilesystemimage
    -f DIRECTORY  : save files to DIRECTORY
    -d            : save deleted files
    -c            : save unused clusters
+   -u            : save unlinked cluster chains
    -l            : save data from unused cluster space
    -o OFFSET     : offset to FAT bootsector
    -v            : be verbose
@@ -172,6 +176,7 @@ GetOptions(
     "d" => \$g_saveDeletedFiles,
     "c" => \$g_saveUnusedClusters,
     "l" => \$g_saveLeftoverSize,
+    "u" => \$g_saveOrphanedChains,
     "v" => \$g_verbose,
     "q" => \$g_quiet,
     "r" => \$g_repair,
@@ -185,7 +190,7 @@ my $fh= new IO::File($extromname, "r") or die "$extromname: $!\n";
 binmode $fh;
 
 my $data;
-$fh->read($data, 512);
+$fh->read($data, $g_sectorsize);
 if (substr($data,510) eq "\x55\xaa" && substr($data,0,2) eq "\xfa\x33") {
     PartitionTable::dump_ptable($data);
     my $fatidx= PartitionTable::get_fat_partition($data);
@@ -225,7 +230,29 @@ my $rootdata;
 $fh->read($rootdata, $rootnsects*$bootinfo->{BytesPerSector}) or die sprintf("error reading rootdir\n");
 processdir($fh, $bootinfo, $bootinfo->{rootdirofs}, $rootdata, "");
 
-
+# todo: write unused cluster chains
+for my $clus (keys %{$fats[0]}) {
+    next if $clus eq "ref" || $clus eq "emptylist";
+    if (!exists $fats[0]{$clus}{usage} || !@{$fats[0]{$clus}{usage}}) {
+        if (exists $fats[0]{$clus}{clusterlist}) {
+            printf("unreferenced clusterchain starting at %04x, size=%08lx\n", $clus, $bootinfo->{SectorsPerCluster}*$bootinfo->{BytesPerSector}*scalar @{$fats[0]{$clus}{clusterlist}});
+            if ($g_saveOrphanedChains) {
+                my $orphandata= ReadClusterChain($fh, $bootinfo, $fats[0], $clus);
+                my $oofh= IO::File->new(sprintf("orphan%04x", $clus), "w") or die sprintf("orphan%04x: $!\n", $clus);
+                binmode $oofh;
+                $oofh->print($orphandata);
+                $oofh->close();
+            }
+        }
+        else {
+            printf("unreferenced clusterchain starting at %04x\n", $clus);
+        }
+    }
+    elsif (!exists $fats[0]{$clus}{clusterlist} && !exists $fats[0]{emptylist}{$clus}) {
+        printf("non existant clusterchain referenced: %04x\n", $clus);
+    }
+}
+# todo: when not saving, but high verbose level - dump unused clusters
 SaveUnusedClusters($fh, $bootinfo, $fats[0]) if ($g_saveUnusedClusters);
 
 $fh->close();
@@ -294,7 +321,7 @@ sub ReadBootInfo {
     printf("reading bootsector from %08lx\n", $fh->tell()) if (!$g_quiet);
 
 	my $data;
-	$fh->read($data, 512) or die "error reading bootsector\n";
+	$fh->read($data, $g_sectorsize) or die "error reading bootsector\n";
 
     my @fields;
     my @fieldnames;
@@ -324,6 +351,7 @@ sub ReadBootInfo {
         print(unpack("H*", $fields[-1]), "\n") if ($fields[-1] !~ /^\x00+\x55\xaa$/);
     }
 
+    $g_sectorsize= $bootinfo{BytesPerSector};
 	return \%bootinfo;
 }
 
@@ -334,7 +362,7 @@ sub ReadFat {
     printf("reading fat from %08lx\n", $fh->tell()) if (!$g_quiet);
 
 	my $data;
-	$fh->read($data, 512*$sects) or die "error reading ReadFat\n";
+	$fh->read($data, $g_sectorsize*$sects) or die "error reading ReadFat\n";
 
     my @clusters;
     my $clusterspecial;
@@ -531,6 +559,13 @@ sub PrintDirEntry {
 	elsif (exists $fat->{emptylist}{$ent->{start}}) {
 		printf("   is in emptylist\n") if ($g_verbose);
 	}
+
+    if (exists $fat->{$ent->{start}}) {
+        push @{$fat->{$ent->{start}}{usage}}, $ent;
+    }
+    elsif ($ent->{start}) {
+        printf("dir entry with unknown start cluster: %04x\n", $ent->{start});
+    }
 }
 
 sub PrintDir {
@@ -621,10 +656,10 @@ sub SaveFiles {
 sub ReadSector {
 	my ($fh, $nr)= @_;
 
-	$fh->seek($g_fatOffset+512*$nr, 0);
+	$fh->seek($g_fatOffset+$g_sectorsize*$nr, 0);
 
 	my $data;
-	$fh->read($data, 512);
+	$fh->read($data, $g_sectorsize);
 
 	return $data;
 }
