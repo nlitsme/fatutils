@@ -267,7 +267,12 @@ sub processdir {
 
     my $dir= ParseDirectory($ofs, $data);
 
-    printf("\n directory %s\n\n", $path||"/");
+    if ($g_verbose) {
+	    printf("\n%08lx: directory %s\n\n", $ofs, $path||"/");
+    }
+    else {
+	    printf("\n directory %s\n\n", $path||"/");
+    }
     PrintDir($fats[0], $dir, $bootinfo);
 
     SaveFiles($fh, $bootinfo, $fats[0], $dir, $path) if ($g_saveFilesTo);
@@ -277,6 +282,9 @@ sub processdir {
             next if ($dirent->{filename} eq ".." || $dirent->{filename} eq "." );
 
             my $dirdata= ReadClusterChain($fh, $bootinfo, $fats[0], $dirent->{start});
+	    if (length($dirdata)==0 && $g_verbose) {
+		    $dirdata= ReadCluster($fh, $bootinfo, $dirent->{start});
+	    }
             my $dirofs= (($dirent->{start}-2)*$bootinfo->{SectorsPerCluster}+$bootinfo->{cluster2sector})*$bootinfo->{BytesPerSector};
             processdir($fh, $bootinfo, $dirofs, $dirdata, $path."/".($dirent->{lfn}||$dirent->{filename}));
         }
