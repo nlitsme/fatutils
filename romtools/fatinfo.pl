@@ -257,6 +257,13 @@ SaveUnusedClusters($fh, $bootinfo, $fats[0]) if ($g_saveUnusedClusters);
 
 $fh->close();
 
+sub getEntryName {
+	my $ent=shift;
+	my $name= $ent->{lfn} || $ent->{filename};
+	$name =~ s/^\xe5/deleted-/;
+	return $name;
+}
+
 # parameters:
 #   fh: handle to file containing fat image
 #   bootinfo: params from bootsector
@@ -286,7 +293,7 @@ sub processdir {
 		    $dirdata= ReadCluster($fh, $bootinfo, $dirent->{start});
 	    }
             my $dirofs= (($dirent->{start}-2)*$bootinfo->{SectorsPerCluster}+$bootinfo->{cluster2sector})*$bootinfo->{BytesPerSector};
-            processdir($fh, $bootinfo, $dirofs, $dirdata, $path."/".($dirent->{lfn}||$dirent->{filename}));
+            processdir($fh, $bootinfo, $dirofs, $dirdata, $path."/".getEntryName($dirent));
         }
     }
 }
@@ -537,17 +544,25 @@ sub isDirentry {
     my $ent= shift;
     return $ent->{attribute}&0x10;
 }
+sub decodeFatDate {
+	my $x= shift;
+	return sprintf("%04d-%02d-%02d", ($x>>9)+1980, ($x>>5)&31, $x&31);
+}
+sub decodeFatTime {
+	my $x= shift;
+	return sprintf("%02d:%02d:%02d", ($x>>11), ($x>>5)&63, ($x&31)*2);
+}
 sub PrintDirEntry {
 	my ($fat, $ent, $boot)= @_;
 
     if (($ent->{attribute}&0x10)!=0 && $ent->{filesize}==0) {
-        printf("%-12s %02x %04x-%04x %04x:%04x %8s  '%s'\n",
-            $ent->{filename}, $ent->{attribute}, $ent->{time}, $ent->{date},
+        printf("%-12s %02x %s %s %04x:%04x %8s  '%s'\n",
+            $ent->{filename}, $ent->{attribute}, decodeFatDate($ent->{date}), decodeFatTime($ent->{time}),
             $ent->{highstart}, $ent->{start}, "<DIR>", $ent->{lfn}) if (!$g_quiet);
     }
     else {
-        printf("%-12s %02x %04x-%04x %04x:%04x %8d  '%s'\n",
-            $ent->{filename}, $ent->{attribute}, $ent->{time}, $ent->{date},
+        printf("%-12s %02x %s %s %04x:%04x %8d  '%s'\n",
+            $ent->{filename}, $ent->{attribute}, decodeFatDate($ent->{date}), decodeFatTime($ent->{time}),
             $ent->{highstart}, $ent->{start}, $ent->{filesize}, $ent->{lfn}) if (!$g_quiet);
     }
 	if (!isDirentry($ent) &&  exists $fat->{$ent->{start}}) {
@@ -557,7 +572,7 @@ sub PrintDirEntry {
 			#printf("   has %d clusters\n", $nclusters);
 		}
 		else {
-			printf("%s   has %d clusters, expected %d clusters\n", $ent->{lfn} || $ent->{filename}, $nclusters, $expectedclusters);
+			printf("%s   has %d clusters, expected %d clusters\n", getEntryName($ent), $nclusters, $expectedclusters);
 
             if ($g_repair) {
                 ModifyFileSize($ent, $nclusters*$boot->{SectorsPerCluster}*$boot->{BytesPerSector});
@@ -617,7 +632,7 @@ sub ReadClusterChain {
 sub SaveEntry {
 	my ($fh, $boot, $fat, $ent, $path)= @_;
 
-	my $name= GetUniqueName("$g_saveFilesTo$path", $ent->{lfn} || $ent->{filename});
+	my $name= GetUniqueName("$g_saveFilesTo$path", getEntryName($ent));
 	my $outfh= IO::File->new($name, "w+") or die "$name: $!";
 	binmode($outfh);
 	if (exists $fat->{$ent->{start}}) {
