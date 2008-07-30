@@ -15,6 +15,17 @@ use strict;
 
 my $g_sectorsize=512;
 
+use constant {
+    direntrysize=>32,
+    partitiontableoffset=>0x1be,
+    partitionentrysize=>16,
+    nrpartitionentries=>4,
+    bootsectorsize=>512,
+    partitiontablesectorsize=>512,
+
+    attr_dir=>0x10,
+};
+
 package PartitionTable;
 use strict;
 use IO::File;
@@ -50,12 +61,12 @@ my %typelist= (
 
 sub dump_ptable {
     my ($data)= @_;
-    if (substr($data, 510, 2) ne "\x55\xaa") {
+    if (substr($data, &partitiontablesectorsize-2, 2) ne "\x55\xaa") {
         warn "missing 55aa signature at end of ptable\n";
     }
-    for (0..3) {
-        my $pdata= substr($data, 0x1be+0x10*$_, 0x10);
-        next if ($pdata eq "\x00" x 16);
+    for (0..&nrpartitionentries-1) {
+        my $pdata= substr($data, &partitiontableoffset+&partitionentrysize*$_, &partitionentrysize);
+        next if ($pdata eq "\x00" x &partitionentrysize);
         my $ptab= parsepentry($pdata);
         printpentry($ptab);
     }
@@ -65,23 +76,23 @@ sub is_fat_type {
 }
 sub get_fat_partition {
     my ($data, $n)= @_;
-    if (substr($data, 510, 2) ne "\x55\xaa") {
+    if (substr($data, &partitiontablesectorsize-2, 2) ne "\x55\xaa") {
         warn "missing 55aa signature at end of ptable\n";
     }
     for (0..3) {
-        my $pdata= substr($data, 0x1be+0x10*$_, 0x10);
-        next if ($pdata eq "\x00" x 16);
+        my $pdata= substr($data, &partitiontableoffset+&partitionentrysize*$_, &partitionentrysize);
+        next if ($pdata eq "\x00" x &partitionentrysize);
         my $ptab= parsepentry($pdata);
         return $_ if is_fat_type($ptab->{type});
     }
 }
 sub partition_offset {
     my ($data, $n)= @_;
-    if (substr($data, 510, 2) ne "\x55\xaa") {
+    if (substr($data, &partitiontablesectorsize-2, 2) ne "\x55\xaa") {
         warn "missing 55aa signature at end of ptable\n";
     }
-    my $pdata= substr($data, 0x1be+0x10*$n, 0x10);
-    return if ($pdata eq "\x00" x 16);
+    my $pdata= substr($data, &partitiontableoffset+&partitionentrysize*$_, &partitionentrysize);
+    return if ($pdata eq "\x00" x &partitionentrysize);
     my $ptab= parsepentry($pdata);
     return $ptab->{startsector}*$g_sectorsize;
 }
@@ -191,7 +202,7 @@ binmode $fh;
 
 my $data;
 $fh->read($data, $g_sectorsize);
-if (substr($data,510) eq "\x55\xaa" && substr($data,0,2) eq "\xfa\x33") {
+if (substr($data,partitiontablesectorsize-2, 2) eq "\x55\xaa" && substr($data,0,2) eq "\xfa\x33") {
     PartitionTable::dump_ptable($data);
     my $fatidx= PartitionTable::get_fat_partition($data);
     if (defined $fatidx) {
@@ -219,13 +230,13 @@ $bootinfo->{rootdirofs}= $fh->tell();
 
 printf("reading rootdir from %08lx\n", $bootinfo->{rootdirofs}) if (!$g_quiet);
 
-$bootinfo->{cluster2sector}= $bootinfo->{RootEntries}/16 + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + $bootinfo->{ReservedSectors};
+$bootinfo->{cluster2sector}= $bootinfo->{RootEntries}*direntrysize/$bootinfo->{BytesPerSector} + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + $bootinfo->{ReservedSectors};
 printf("cluster#2 : sector 0x%x ( offset %08lx )\n", $bootinfo->{cluster2sector}, $bootinfo->{cluster2sector}*$bootinfo->{BytesPerSector}+$g_fatOffset);
 
 $bootinfo->{totalclusters}= int(($bootinfo->{NumberOfSectors}-$bootinfo->{cluster2sector})/$bootinfo->{SectorsPerCluster});
 
 $fh->seek($bootinfo->{rootdirofs}, SEEK_SET);
-my $rootnsects= $bootinfo->{RootEntries}?$bootinfo->{RootEntries}/16:1;
+my $rootnsects= $bootinfo->{RootEntries}?$bootinfo->{RootEntries}*direntrysize/$bootinfo->{BytesPerSector}:1;
 my $rootdata;
 $fh->read($rootdata, $rootnsects*$bootinfo->{BytesPerSector}) or die sprintf("error reading rootdir\n");
 processdir($fh, $bootinfo, $bootinfo->{rootdirofs}, $rootdata, "");
@@ -285,7 +296,7 @@ sub processdir {
     SaveFiles($fh, $bootinfo, $fats[0], $dir, $path) if ($g_saveFilesTo);
 
     for my $dirent (@$dir) {
-        if ($dirent->{attribute}&0x10) {
+        if ($dirent->{attribute}&attr_dir) {
             next if ($dirent->{filename} eq ".." || $dirent->{filename} eq "." );
 
             my $dirdata= ReadClusterChain($fh, $bootinfo, $fats[0], $dirent->{start});
@@ -336,7 +347,7 @@ sub ReadBootInfo {
     printf("reading bootsector from %08lx\n", $fh->tell()) if (!$g_quiet);
 
     my $data;
-    $fh->read($data, $g_sectorsize) or die "error reading bootsector\n";
+    $fh->read($data, bootsectorsize) or die "error reading bootsector\n";
 
     my @fields;
     my @fieldnames;
@@ -367,6 +378,7 @@ sub ReadBootInfo {
     }
 
     $g_sectorsize= $bootinfo{BytesPerSector};
+    $fh->seek($g_sectorsize-&bootsectorsize, SEEK_CUR);
     return \%bootinfo;
 }
 
@@ -506,8 +518,8 @@ sub ParseDirectory {
 
     my @entries;
     my @lfn= ();
-    for my $entidx (0..length($data)/32-1) {
-        my $entrydata= substr($data, 32*$entidx, 32);
+    for my $entidx (0..length($data)/direntrysize-1) {
+        my $entrydata= substr($data, direntrysize*$entidx, direntrysize);
 
         next if ($entrydata =~ /^\x00+$/);
 
@@ -515,7 +527,7 @@ sub ParseDirectory {
 
         # NOTE: this only works for rootdir entries.
         # other directories are not nescesarily stored in consequetive sectors.
-        push @{$ent->{diskoffsets}}, $startofs+32*$entidx;
+        push @{$ent->{diskoffsets}}, $startofs+direntrysize*$entidx;
 
         if (exists $ent->{part}) {
             push @lfn, $ent->{namepart};
@@ -545,7 +557,7 @@ sub ModifyFileSize {
 }
 sub isDirentry {
     my $ent= shift;
-    return $ent->{attribute}&0x10;
+    return $ent->{attribute}&attr_dir;
 }
 sub decodeFatDate {
     my $x= shift;
@@ -558,7 +570,7 @@ sub decodeFatTime {
 sub PrintDirEntry {
     my ($fat, $ent, $boot)= @_;
 
-    if (($ent->{attribute}&0x10)!=0 && $ent->{filesize}==0) {
+    if (($ent->{attribute}&attr_dir)!=0 && $ent->{filesize}==0) {
         printf("%-12s %02x %s %s %04x:%04x %8s  '%s'\n",
             $ent->{filename}, $ent->{attribute}, decodeFatDate($ent->{date}), decodeFatTime($ent->{time}),
             $ent->{highstart}, $ent->{start}, "<DIR>", $ent->{lfn}) if (!$g_quiet);
@@ -646,7 +658,8 @@ sub SaveEntry {
         }
     }
     elsif (exists $fat->{emptylist}{$ent->{start}}) {
-        my $nclusters= int(($ent->{filesize}+2047)/2048);
+        my $clustersize= $boot->{SectorsPerCluster}*$boot->{BytesPerSector};
+        my $nclusters= int(($ent->{filesize}+$clustersize-1)/$clustersize);
         for my $cluster (0..$nclusters-1) {
             $outfh->write(ReadCluster($fh, $boot, $cluster+$ent->{start}));
 
@@ -673,7 +686,7 @@ sub SaveFiles {
     my ($fh, $boot, $fat, $directory, $path)= @_;
 
     for my $dirent (@$directory) {
-        if (($dirent->{attribute}&0x10)==0) {
+        if (($dirent->{attribute}&attr_dir)==0) {
             SaveEntry($fh, $boot, $fat, $dirent, $path) if ($g_saveDeletedFiles || !isDeletedEntry($dirent));
         }
     }
