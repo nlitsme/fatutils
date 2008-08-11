@@ -61,12 +61,12 @@ my %typelist= (
 
 sub dump_ptable {
     my ($data)= @_;
-    if (substr($data, &partitiontablesectorsize-2, 2) ne "\x55\xaa") {
+    if (substr($data, &::partitiontablesectorsize-2, 2) ne "\x55\xaa") {
         warn "missing 55aa signature at end of ptable\n";
     }
-    for (0..&nrpartitionentries-1) {
-        my $pdata= substr($data, &partitiontableoffset+&partitionentrysize*$_, &partitionentrysize);
-        next if ($pdata eq "\x00" x &partitionentrysize);
+    for (0..&::nrpartitionentries-1) {
+        my $pdata= substr($data, &::partitiontableoffset+&::partitionentrysize*$_, &::partitionentrysize);
+        next if ($pdata eq "\x00" x &::partitionentrysize);
         my $ptab= parsepentry($pdata);
         printpentry($ptab);
     }
@@ -76,23 +76,23 @@ sub is_fat_type {
 }
 sub get_fat_partition {
     my ($data, $n)= @_;
-    if (substr($data, &partitiontablesectorsize-2, 2) ne "\x55\xaa") {
+    if (substr($data, &::partitiontablesectorsize-2, 2) ne "\x55\xaa") {
         warn "missing 55aa signature at end of ptable\n";
     }
     for (0..3) {
-        my $pdata= substr($data, &partitiontableoffset+&partitionentrysize*$_, &partitionentrysize);
-        next if ($pdata eq "\x00" x &partitionentrysize);
+        my $pdata= substr($data, &::partitiontableoffset+&::partitionentrysize*$_, &::partitionentrysize);
+        next if ($pdata eq "\x00" x &::partitionentrysize);
         my $ptab= parsepentry($pdata);
         return $_ if is_fat_type($ptab->{type});
     }
 }
 sub partition_offset {
     my ($data, $n)= @_;
-    if (substr($data, &partitiontablesectorsize-2, 2) ne "\x55\xaa") {
+    if (substr($data, &::partitiontablesectorsize-2, 2) ne "\x55\xaa") {
         warn "missing 55aa signature at end of ptable\n";
     }
-    my $pdata= substr($data, &partitiontableoffset+&partitionentrysize*$_, &partitionentrysize);
-    return if ($pdata eq "\x00" x &partitionentrysize);
+    my $pdata= substr($data, &::partitiontableoffset+&::partitionentrysize*$n, &::partitionentrysize);
+    return if ($pdata eq "\x00" x &::partitionentrysize);
     my $ptab= parsepentry($pdata);
     return $ptab->{startsector}*$g_sectorsize;
 }
