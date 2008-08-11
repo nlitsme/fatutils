@@ -609,7 +609,7 @@ sub PrintDirEntry {
 sub PrintDir {
     my ($fat, $directory, $boot)= @_;
 
-    print "8.3name    attr datetime start         size    longfilename\n" if (!$g_quiet);
+    print "8.3name    attr datetime            start         size    longfilename\n" if (!$g_quiet);
     for my $dirent (@$directory) {
         PrintDirEntry($fat, $dirent, $boot) if ($g_saveDeletedFiles || $g_verbose || !isDeletedEntry($dirent));
     }
