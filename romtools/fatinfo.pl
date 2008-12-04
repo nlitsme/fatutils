@@ -466,7 +466,7 @@ sub ParseLFNEntry {
     my $unicodename= $fields[1].$fields[5].$fields[7];
     #print join(", ", map {sprintf("%d:%s", $_, unpack("H*",$fields[$_])) } (0..$#fields)), "\n";
 
-    my $namepart= pack("C*", grep { $_<256 } unpack("v*", $unicodename));
+    my $namepart= pack("U*", grep { $_<256 } unpack("v*", $unicodename));
 
     $namepart =~ s/\x00.*//;
 
