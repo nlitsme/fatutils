@@ -228,20 +228,31 @@ for my $fatidx (0 .. $bootinfo->{NumberOfFats}-1) {
 
 print "found ", scalar keys %{$fats[0]}, " files in fat\n" if (!$g_quiet);
 
-$bootinfo->{rootdirofs}= $fh->tell();
-
-printf("reading rootdir from %08lx\n", $bootinfo->{rootdirofs}) if (!$g_quiet);
-
 $bootinfo->{cluster2sector}= $bootinfo->{RootEntries}*direntrysize/$bootinfo->{BytesPerSector} + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + $bootinfo->{ReservedSectors};
 printf("cluster#2 : sector 0x%x ( offset %08lx )\n", $bootinfo->{cluster2sector}, $bootinfo->{cluster2sector}*$bootinfo->{BytesPerSector}+$g_fatOffset);
 
 $bootinfo->{totalclusters}= int(($bootinfo->{NumberOfSectors}-$bootinfo->{cluster2sector})/$bootinfo->{SectorsPerCluster});
 
-$fh->seek($bootinfo->{rootdirofs}, SEEK_SET);
-my $rootnsects= $bootinfo->{RootEntries}?$bootinfo->{RootEntries}*direntrysize/$bootinfo->{BytesPerSector}:1;
-my $rootdata;
-$fh->read($rootdata, $rootnsects*$bootinfo->{BytesPerSector}) or die sprintf("error reading rootdir\n");
-processdir($fh, $bootinfo, $bootinfo->{rootdirofs}, $rootdata, "");
+$bootinfo->{rootdirofs}= $bootinfo->{StartOfRootDir} ?  (($bootinfo->{StartOfRootDir}-2)*$bootinfo->{SectorsPerCluster}+$bootinfo->{cluster2sector})*$bootinfo->{BytesPerSector} : $fh->tell();
+
+if ($bootinfo->{RootEntries}) {
+    $fh->seek($bootinfo->{rootdirofs}, SEEK_SET);
+    my $rootnsects= $bootinfo->{RootEntries}*direntrysize/$bootinfo->{BytesPerSector};
+
+    printf("reading rootdir from %08lx, %d entries [ %d sectors ]\n", $bootinfo->{rootdirofs}, $bootinfo->{RootEntries}, $rootnsects) if (!$g_quiet);
+
+    my $rootdata;
+    $fh->read($rootdata, $rootnsects*$bootinfo->{BytesPerSector}) or die sprintf("error reading rootdir\n");
+    processdir($fh, $bootinfo, $bootinfo->{rootdirofs}, $rootdata, "");
+}
+else {
+    printf("reading rootdir from clus %d\n", $bootinfo->{StartOfRootDir});
+
+    my $rootdata= ReadClusterChain($fh, $bootinfo, $fats[0], $bootinfo->{StartOfRootDir});
+
+    my $startsector= ($bootinfo->{StartOfRootDir}-2)*$bootinfo->{SectorsPerCluster}+$bootinfo->{cluster2sector};
+    processdir($fh, $bootinfo, $startsector*$bootinfo->{BytesPerSector}, $rootdata, "");
+}
 
 # todo: write unused cluster chains
 for my $clus (keys %{$fats[0]}) {
@@ -700,6 +711,7 @@ sub ReadSector {
 
     $fh->seek($g_fatOffset+$g_sectorsize*$nr, 0);
 
+    #printf("reading sector 0x%x : offset=0x%x\n", $nr, $g_fatOffset+$g_sectorsize*$nr);
     my $data;
     $fh->read($data, $g_sectorsize);
 
@@ -708,11 +720,12 @@ sub ReadSector {
 sub ReadCluster {
     my ($fh, $boot, $nr)= @_;
 
-    my $startsector= ($nr-2)*$bootinfo->{SectorsPerCluster}+$boot->{cluster2sector};
+    my $startsector= ($nr-2)*$boot->{SectorsPerCluster}+$boot->{cluster2sector};
 
     my @data;
 
-    for my $sector (0..$bootinfo->{SectorsPerCluster}-1) {
+    #printf("reading cluster 0x%x\n", $nr);
+    for my $sector (0..$boot->{SectorsPerCluster}-1) {
         push @data, ReadSector($fh, $startsector+$sector);
     }
 
@@ -775,7 +788,7 @@ sub SaveUnusedClusters {
 # 24 V     SectorsPerFAT
 # 28 v     Flags
 # 2a v     Version
-# 2c V     StartOfRootDir
+# 2c V     StartOfRootDir  - clusternr
 # 30 v     FSISector
 # 32 v     BackupBootSector
 # 34 A12   reserved
