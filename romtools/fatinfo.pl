@@ -26,6 +26,7 @@ use constant {
     partitiontablesectorsize=>512,
 
     attr_dir=>0x10,
+    attr_vol=>0x08,
 };
 
 package PartitionTable;
@@ -700,7 +701,7 @@ sub SaveFiles {
     my ($fh, $boot, $fat, $directory, $path)= @_;
 
     for my $dirent (@$directory) {
-        if (($dirent->{attribute}&attr_dir)==0) {
+        if (($dirent->{attribute}&(attr_dir|attr_vol))==0) {
             SaveEntry($fh, $boot, $fat, $dirent, $path) if ($g_saveDeletedFiles || !isDeletedEntry($dirent));
         }
     }
