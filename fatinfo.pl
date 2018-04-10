@@ -361,7 +361,7 @@ sub ReadBootInfo {
     printf("reading bootsector from %08lx\n", $fh->tell()) if (!$g_quiet);
 
     my $data;
-    $fh->read($data, bootsectorsize) or die "error reading bootsector\n";
+    $fh->read($data, bootsectorsize) or die "error reading bootsector: $!\n";
 
     my @fields;
     my @fieldnames;
@@ -541,7 +541,7 @@ sub ParseDirectory {
         my $ent= ParseDirEntry($entrydata);
 
         # NOTE: this only works for rootdir entries.
-        # other directories are not nescesarily stored in consequetive sectors.
+        # other directories are not nescesarily stored in consecutive sectors.
         push @{$ent->{diskoffsets}}, $startofs+direntrysize*$entidx;
 
         if (exists $ent->{part}) {
@@ -640,6 +640,8 @@ sub GetUniqueName {
         die "not a directory: $dir\n";
     }
     mkpath $dir if (!-d $dir);
+
+    $name =~ s/[\x00-\x1f]/_/g;
 
     my $fn= "$dir/$name";
     my $i= 1;
