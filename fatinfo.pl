@@ -13,8 +13,6 @@ use strict;
 # todo:
 #    allow user to specify partition in diskimage
 
-# todo: prefix all deleted files with 'deleted-', not just the ones with 8.3 name only
-
 my $g_sectorsize=512;
 
 use constant {
