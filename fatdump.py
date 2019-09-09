@@ -6,6 +6,8 @@ Tool for listing the contents of a FAT filesystem
 from __future__ import division, print_function
 import struct
 import os
+import os.path
+import re
 from binascii import b2a_hex
 import datetime
 
@@ -348,6 +350,13 @@ class FatDirectory:
             """
             return "%s%s%s%s%s" % ("-R"[1&self.attr], "-H"[1&self.attr>>1], "-S"[1&self.attr>>2], "-A"[1&self.attr>>5], "L" if 1&self.attr>>3 else "D" if 1&self.attr>>4 else "F")
 
+        def isdir(self):
+            return (self.attr&16)!=0
+        def islabel(self):
+            return (self.attr&32)!=0
+        def isfile(self):
+            return not self.isdir() and not self.islabel()
+
     class LongNameEntry:
         """
         A Long name entry
@@ -533,6 +542,36 @@ def catfile(fs, fname):
         print(block[:want])
         n -= want
 
+def makesafe(pathitem):
+    pathitem = re.sub(r'[^a-zA-Z0-9.,_-]+', '_', pathitem)
+    if pathitem in ('', '.', '..'):
+        return '_'
+    return pathitem
+
+def extractfiles(fs, savedir):
+    if not savedir:
+        savedir = "."
+    for path, ent in fs.recursedir(fs.root):
+        longname = ent.longname or ent.eightdotthree()
+        #print("%-26s %12d [%08x] %s %s/%s" % (ent.timeCreated, ent.filesize, ent.cluster, ent.attributes(), "/".join(path), longname))
+        if not ent.isfile():
+            continue
+        savepath = "/".join(makesafe(_) for _ in path)
+        savename = makesafe(longname)
+        os.makedirs(savedir + "/" + savepath, exist_ok=True)
+        fullsavepath = savedir + "/" + savepath + "/" + savename
+        if os.path.isfile(fullsavepath):
+            print("File already exists: %s" % fullsavepath)
+            continue
+        n = ent.filesize
+        with open(fullsavepath, "wb") as fh:
+            for block in fs.getchaindata(ent.cluster):
+                want = min(n, len(block))
+                fh.write(block[:want])
+                n -= want
+        print("Saved %s" % fullsavepath)
+
+
 def processfs(args, fs):
     if args.listfiles:
         listfiles(fs)
@@ -541,6 +580,8 @@ def processfs(args, fs):
     #print(fs.fat.findChains())
     if args.verbose:
         fs.fat.dumpChainBranches()
+    if args.extract:
+        extractfiles(fs, args.savedir)
 
 def DirEnumerator(args, path):
     """
@@ -641,6 +682,8 @@ def main():
     parser.add_argument('--recurse', '-r', action='store_true', help='recurse into directories, when finding disk images')
     parser.add_argument('--skiplinks', '-L', action='store_true', help='ignore symlinks')
     parser.add_argument('--listfiles', '-l', action='store_true', help='list files')
+    parser.add_argument('--extract', '-x', action='store_true', help='extract files to the current or specified directory')
+    parser.add_argument('--savedir', '-d', help='where to extract files to')
     parser.add_argument('--badblocks', type=str, help='bad sector nrs')
     parser.add_argument('--blocksize', type=str, help='the blocksize')
     parser.add_argument('--cat', '-c', type=str, help='cat a file to stdout')
