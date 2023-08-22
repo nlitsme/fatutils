@@ -1,4 +1,4 @@
-#!perl -w
+#!/usr/bin/perl -w
 use strict;
 # (C) 2003-2007 Willem Jan Hengeveld <itsme@xs4all.nl>
 # Web: http://www.xs4all.nl/~itsme/

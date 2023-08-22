@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 """
 Author: Willem Hengeveld <itsme@xs4all.nl>
 
