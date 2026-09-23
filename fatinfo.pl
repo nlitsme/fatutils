@@ -12,6 +12,7 @@ use strict;
 # 
 # todo:
 #    allow user to specify partition in diskimage
+# TODO: print info on sec->clus->ofs mapping, including last used offset
 
 my $g_sectorsize=512;
 
@@ -227,16 +228,16 @@ for my $fatidx (0 .. $bootinfo->{NumberOfFats}-1) {
 
 print "found ", scalar keys %{$fats[0]}, " files in fat\n" if (!$g_quiet);
 
-$bootinfo->{cluster2sector}= $bootinfo->{RootEntries}*direntrysize/$bootinfo->{BytesPerSector} + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + $bootinfo->{ReservedSectors};
+$bootinfo->{cluster2sector}= $bootinfo->{RootEntries}*direntrysize/($bootinfo->{BytesPerSector}||512) + $bootinfo->{SectorsPerFAT}*$bootinfo->{NumberOfFats} + $bootinfo->{ReservedSectors};
 printf("cluster#2 : sector 0x%x ( offset %08lx )\n", $bootinfo->{cluster2sector}, $bootinfo->{cluster2sector}*$bootinfo->{BytesPerSector}+$g_fatOffset);
 
-$bootinfo->{totalclusters}= int(($bootinfo->{NumberOfSectors}-$bootinfo->{cluster2sector})/$bootinfo->{SectorsPerCluster});
+$bootinfo->{totalclusters}= int(($bootinfo->{NumberOfSectors}-$bootinfo->{cluster2sector})/($bootinfo->{SectorsPerCluster}||1));
 
 $bootinfo->{rootdirofs}= $bootinfo->{StartOfRootDir} ?  (($bootinfo->{StartOfRootDir}-2)*$bootinfo->{SectorsPerCluster}+$bootinfo->{cluster2sector})*$bootinfo->{BytesPerSector} : $fh->tell();
 
 if ($bootinfo->{RootEntries}) {
     $fh->seek($bootinfo->{rootdirofs}, SEEK_SET);
-    my $rootnsects= $bootinfo->{RootEntries}*direntrysize/$bootinfo->{BytesPerSector};
+    my $rootnsects= $bootinfo->{RootEntries}*direntrysize/($bootinfo->{BytesPerSector}||512);
 
     printf("reading rootdir from %08lx, %d entries [ %d sectors ]\n", $bootinfo->{rootdirofs}, $bootinfo->{RootEntries}, $rootnsects) if (!$g_quiet);
 
@@ -255,7 +256,7 @@ else {
 
 # todo: write unused cluster chains
 for my $clus (keys %{$fats[0]}) {
-    next if $clus eq "ref" || $clus eq "emptylist";
+    next if $clus eq "ref" || $clus eq "emptylist" || $clus eq "";
     if (!exists $fats[0]{$clus}{usage} || !@{$fats[0]{$clus}{usage}}) {
         if (exists $fats[0]{$clus}{clusterlist}) {
             printf("unreferenced clusterchain starting at %04x, size=%08lx\n", $clus, $bootinfo->{SectorsPerCluster}*$bootinfo->{BytesPerSector}*scalar @{$fats[0]{$clus}{clusterlist}});
